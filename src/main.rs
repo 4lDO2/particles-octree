@@ -33,13 +33,13 @@ fn main() -> Result<()> {
     let threshold = 0.05;
 
     let particles = rows.collect::<Result<Vec<_>>>()?;
-    let mut pairs = Vec::with_capacity(particles.len() * (particles.len() + 1) / 2);
+    let mut pairs = Vec::with_capacity(particles.len() * (particles.len() - 1) / 2);
     println!("Input: {} coordinates", particles.len());
 
     let now = Instant::now();
 
     for i in 0..particles.len() {
-        for j in i..particles.len() {
+        for j in i + 1..particles.len() {
             if square(subtract(particles[i], particles[j])) <= threshold * threshold {
                 pairs.push((i, j));
             }
