@@ -14,6 +14,7 @@ enum Node {
 struct Tree {
     root: Option<Node>,
     root_level: i8,
+    mid: Vectorf,
 }
 
 const RADIUS: f32 = 0.05;
@@ -24,7 +25,11 @@ fn vector_to_idx(vector: &Vectorf) -> u8 {
 
 impl Tree {
     pub fn insert(&mut self, index: u32, all_positions: &[Vectorf]) {
-        if self.root.is_none() || pos_radius_relative.magnitude_squared() >= 3.0 * f32::powi(2.0, self.root_level.into()) {
+        if self.root.is_none() {
+            self.root = Some(Node::Final { particle_idx: index });
+            return;
+        }
+        if all_positions[index as usize] > Vectorf::repeat(f32::powi(2.0, self.root_level.into())) + self.mid {
             let mut children = Box::new([const { None }; 8]);
             children[usize::from(vector_to_idx(pos_radius_relative))] = self.root.take();
             let parent = Node::Split { children };
@@ -48,7 +53,7 @@ impl Node {
         };
 
         let aabb_size = f32::powi(2.0, level.into());
-        let child_idx = usize::from(vector_to_idx(&pos_radius_relative));
+        let child_idx = usize::from(vector_to_idx(&(positions[index as usize] - mid)));
         let child = &mut children[child_idx];
 
         if let Some(child) = child {
@@ -57,7 +62,7 @@ impl Node {
                 if child_idx & 2 == 2 { 1.0 } else { -1.0 },
                 if child_idx & 4 == 4 { 1.0 } else { -1.0 },
             );
-            child.insert(&(pos_radius_relative + direction * aabb_size), index, level - 1)
+            child.insert(&(mid + direction * aabb_size), index, level - 1, positions)
         } else {
             *child = Some(Node::Final { particle_idx: index });
         }
@@ -75,7 +80,7 @@ fn main() -> Result<()> {
         /*std::env::args()
             .nth(1)
             .context("expected input file as argument")?,*/
-        "data/positions.xyz",
+        "data/positions_large.xyz",
     )?);
 
     let particles = {
@@ -119,6 +124,7 @@ fn main() -> Result<()> {
     let mut tree = Tree {
         root: None,
         root_level: 0,
+        mid: Vectorf::zeros(),
     };
     for i in 0..particles.len() {
         tree.insert(i as u32, &particles);
