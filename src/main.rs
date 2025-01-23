@@ -137,25 +137,52 @@ impl Tree {
     pub fn neighbor_radius_search(
         &self,
         particles: &[Vectorf],
-        arena: &[RawIndex; 8],
+        arena: &[[RawIndex; 8]],
     ) -> Vec<(u32, u32)> {
         // TODO: parallelize
 
         let mut in_progress = Vec::new();
+        let mut next_in_progress = Vec::new();
 
         match Node::from_raw_index(self.root) {
             None | Some(Node::Final { .. }) => return Vec::new(),
             Some(Node::Split { interm_idx }) => {
-                for i in 0..8 {
+                for i in 0..8_usize {
                     for j in 0..i {
-                        in_progress.push((interm_idx + i, interm_idx + j));
+                        in_progress.push((arena[interm_idx as usize][i], arena[interm_idx as usize][j]));
                     }
                 }
             }
         }
-        todo!();
 
         let mut pairs = Vec::new();
+        let mut granularity = f32::powi(2.0, self.root_level.into());
+        loop {
+            for (p, q) in in_progress.drain(..) {
+                match (Node::from_raw_index(p), Node::from_raw_index(q)) {
+                    (None, _) | (_, None) => continue,
+                    (Some(Node::Split { interm_idx: i1 }), Some(Node::Split { interm_idx: i2 })) => {
+                        // Append Cartesian product of respective subnodes, filtering out the ones
+                        // that cannot be within range at all.
+                    }
+                    (Some(Node::Final { particle_idx }), Some(Node::Split { interm_idx })) | (Some(Node::Split { interm_idx }), Some(Node::Final { particle_idx })) => {
+                        // Append (_, single) coset.
+                    }
+                    (Some(Node::Final { particle_idx: f1 }), Some(Node::Final { particle_idx: f2 })) => {
+                        if (particles[f1 as usize] - particles[f2 as usize]).norm_squared() <= 1.0 {
+                            pairs.push((f1, f2));
+                        }
+                    }
+                }
+            }
+            granularity *= 0.5;
+            if next_in_progress.is_empty() {
+                break;
+            }
+            std::mem::swap(&mut in_progress, &mut next_in_progress);
+            next_in_progress.clear();
+        }
+
         pairs
     }
 }
@@ -269,11 +296,15 @@ fn main() -> Result<()> {
     }
     println!("Built tree in {:?}", now0.elapsed());
     //println!("Tree: {tree:?}");
-    core::hint::black_box(tree);
+    core::hint::black_box(&tree);
 
     println!("Input: {} coordinates", particles.len());
 
-    //tree.neighbors_radius_search();
+    println!("Running fast search");
+    let now2 = Instant::now();
+    let res = tree.neighbor_radius_search(&particles, &arena);
+    core::hint::black_box(res);
+    println!("Fast search took {:?}", now2.elapsed());
 
     //let _ = naive(&particles);
 
