@@ -72,9 +72,10 @@ fn square(v: Vectorf) -> f32 {
 
 fn main() -> Result<()> {
     let file = BufReader::new(File::open(
-        std::env::args()
+        /*std::env::args()
             .nth(1)
-            .context("expected input file as argument")?,
+            .context("expected input file as argument")?,*/
+        "data/positions.xyz",
     )?);
 
     let particles = {
