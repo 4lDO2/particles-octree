@@ -1,3 +1,5 @@
+#![feature(let_chains)]
+
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::time::Instant;
@@ -5,12 +7,12 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use nalgebra::Vector3;
 
-enum Node<'arena> {
-    Split { children: [Option<&'arena mut Node<'arena>>; 8] },
+enum Node {
+    Split { children: Box<[Option<Node>; 8]> },
     Final { particle_idx: u32 },
 }
-struct Tree<'arena> {
-    root: Option<&'arena mut Node<'arena>>,
+struct Tree {
+    root: Option<Node>,
     root_level: i8,
 }
 
@@ -20,41 +22,44 @@ fn vector_to_idx(vector: &Vectorf) -> u8 {
     u8::from(vector.x >= 0.0) | (u8::from(vector.y >= 0.0) << 1) | (u8::from(vector.z >= 0.0) << 2)
 }
 
-impl<'arena> Tree<'arena> {
-    pub fn insert(&'arena mut self, mut pos_radius_relative: &Vectorf, index: u32, arena: &'arena mut bumpalo::Bump) {
+impl Tree {
+    pub fn insert(&mut self, index: u32, all_positions: &[Vectorf]) {
         if self.root.is_none() || pos_radius_relative.magnitude_squared() >= 3.0 * f32::powi(2.0, self.root_level.into()) {
-            let mut children = [const { None }; 8];
-            children[usize::from(vector_to_idx(pos_radius_relative))] = Some(self.root.take());
-            let parent = arena.alloc::<Node<'arena>>(Node::Split { children: [const { None }; 8] });
+            let mut children = Box::new([const { None }; 8]);
+            children[usize::from(vector_to_idx(pos_radius_relative))] = self.root.take();
+            let parent = Node::Split { children };
             self.root = Some(parent);
             self.root_level += 1;
-        } else {
-            self.root.as_mut().unwrap().insert(pos_radius_relative, index, self.root_level, arena);
         }
+        self.root.as_mut().unwrap().insert(pos_radius_relative, index, self.root_level);
     }
 }
-impl<'arena> Node<'arena> {
-    pub fn insert(&'arena mut self, mut pos_radius_relative: &Vectorf, index: u32, level: i8, arena: &'arena mut bumpalo::Bump) {
-        match *self {
-            Self::Final { particle_idx } => if index != particle_idx {
-                todo!("new node");
+impl Node {
+    pub fn insert(&mut self, mid: &Vectorf, index: u32, level: i8, positions: &[Vectorf]) {
+        let children = match *self {
+            Node::Final { particle_idx } => if particle_idx == index {
+                return;
+            } else {
+                *self = Node::Split { children: Default::default() };
+                let Node::Split { ref mut children } = self else { unreachable!() };
+                children
             }
-            Self::Split { ref mut children, .. } => {
-                let aabb_size = f32::powi(2.0, level.into());
-                let child_idx = usize::from(vector_to_idx(&pos_radius_relative));
-                let child = &mut children[child_idx];
+            Node::Split { ref mut children } => children,
+        };
 
-                if let Some(child) = child {
-                    let direction = Vectorf::new(
-                        if child_idx & 1 == 1 { 1.0 } else { -1.0 },
-                        if child_idx & 2 == 2 { 1.0 } else { -1.0 },
-                        if child_idx & 4 == 4 { 1.0 } else { -1.0 },
-                    );
-                    child.insert(&(pos_radius_relative + direction * aabb_size), index, level - 1, arena)
-                } else {
-                    *child = Some(arena.alloc::<Node<'arena>>(Node::Final { particle_idx: index }));
-                }
-            }
+        let aabb_size = f32::powi(2.0, level.into());
+        let child_idx = usize::from(vector_to_idx(&pos_radius_relative));
+        let child = &mut children[child_idx];
+
+        if let Some(child) = child {
+            let direction = Vectorf::new(
+                if child_idx & 1 == 1 { 1.0 } else { -1.0 },
+                if child_idx & 2 == 2 { 1.0 } else { -1.0 },
+                if child_idx & 4 == 4 { 1.0 } else { -1.0 },
+            );
+            child.insert(&(pos_radius_relative + direction * aabb_size), index, level - 1)
+        } else {
+            *child = Some(Node::Final { particle_idx: index });
         }
     }
 }
@@ -114,9 +119,8 @@ fn main() -> Result<()> {
         root: None,
         root_level: 0,
     };
-    let mut arena = bumpalo::Bump::new();
-    for (i, pos) in particles.iter().enumerate() {
-        tree.insert(&(pos / RADIUS), i as u32, &mut arena);
+    for i in 0..particles.len() {
+        tree.insert(i as u32, &particles);
     }
 
     println!("Input: {} coordinates", particles.len());
