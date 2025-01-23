@@ -7,10 +7,12 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use nalgebra::Vector3;
 
+#[derive(Debug)]
 enum Node {
     Split { children: Box<[Option<Node>; 8]> },
     Final { particle_idx: u32 },
 }
+#[derive(Debug)]
 struct Tree {
     root: Option<Node>,
     root_level: i8,
@@ -29,24 +31,26 @@ impl Tree {
             self.root = Some(Node::Final { particle_idx: index });
             return;
         }
-        if all_positions[index as usize] > Vectorf::repeat(f32::powi(2.0, self.root_level.into())) + self.mid {
+        let root_shift = all_positions[index as usize] - self.mid;
+        if root_shift.abs() > Vectorf::repeat(f32::powi(2.0, self.root_level.into())) {
             let mut children = Box::new([const { None }; 8]);
-            children[usize::from(vector_to_idx(pos_radius_relative))] = self.root.take();
+            children[usize::from(vector_to_idx(&root_shift))] = self.root.take();
             let parent = Node::Split { children };
             self.root = Some(parent);
             self.root_level += 1;
         }
-        self.root.as_mut().unwrap().insert(pos_radius_relative, index, self.root_level);
+        self.root.as_mut().unwrap().insert(&self.mid, index, self.root_level, all_positions);
     }
 }
 impl Node {
     pub fn insert(&mut self, mid: &Vectorf, index: u32, level: i8, positions: &[Vectorf]) {
         let children = match *self {
             Node::Final { particle_idx } => if particle_idx == index {
-                return;
+                unreachable!("already inserted");
             } else {
                 *self = Node::Split { children: Default::default() };
-                let Node::Split { ref mut children } = self else { unreachable!() };
+                let &mut Node::Split { ref mut children } = self else { unreachable!() };
+                children[usize::from(vector_to_idx(&(positions[particle_idx as usize] - mid)))] = Some(Node::Final { particle_idx });
                 children
             }
             Node::Split { ref mut children } => children,
@@ -126,9 +130,12 @@ fn main() -> Result<()> {
         root_level: 0,
         mid: Vectorf::zeros(),
     };
+    let now0 = Instant::now();
     for i in 0..particles.len() {
         tree.insert(i as u32, &particles);
     }
+    println!("Built tree in {:?}", now0.elapsed());
+    core::hint::black_box(tree);
 
     println!("Input: {} coordinates", particles.len());
     let mut pairs = Vec::with_capacity(1024 * 1024 * 1024);
