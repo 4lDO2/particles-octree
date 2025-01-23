@@ -137,14 +137,14 @@ fn main() -> Result<()> {
     };
     let now0 = Instant::now();
     for i in 0..particles.len() {
-        println!("Inserting {i}");
         tree.insert(i as u32, &particles);
     }
     println!("Built tree in {:?}", now0.elapsed());
-    println!("Tree: {tree:?}");
+    //println!("Tree: {tree:?}");
     core::hint::black_box(tree);
 
     println!("Input: {} coordinates", particles.len());
+    /*
     let mut pairs = Vec::with_capacity(1024 * 1024 * 1024);
 
     let now = Instant::now();
@@ -167,6 +167,7 @@ fn main() -> Result<()> {
     let elapsed = now.elapsed();
     println!("Naïve: {} pairs", pairs.len());
     println!("Naïve implementation took {elapsed:?}");
+    */
 
     Ok(())
 }
