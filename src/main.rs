@@ -2,6 +2,7 @@
 
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::num::NonZeroU32;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -9,15 +10,38 @@ use nalgebra::Vector3;
 
 #[derive(Debug)]
 enum Node {
-    Split { children: Box<[Option<Node>; 8]> },
+    Split { interm_idx: u32 },
     Final { particle_idx: u32 },
+}
+impl Node {
+    fn from_raw_index(i: RawIndex) -> Option<Self> {
+        if i == 0 {
+            None
+        } else if i > 0 {
+            Some(Self::Final {
+                particle_idx: i as u32,
+            })
+        } else {
+            Some(Self::Split {
+                interm_idx: (-i) as u32,
+            })
+        }
+    }
+    fn raw(self) -> RawIndex {
+        match self {
+            Self::Final { particle_idx } => particle_idx as i32,
+            Self::Split { interm_idx } => -(interm_idx as i32),
+        }
+    }
 }
 #[derive(Debug)]
 struct Tree {
-    root: Option<Node>,
+    root: RawIndex,
     root_level: i8,
     mid: Vectorf,
 }
+type RawIndex = i32;
+const NULL_IDX: RawIndex = 0;
 
 const RADIUS: f32 = 0.05;
 
@@ -26,46 +50,60 @@ fn vector_to_idx(vector: &Vectorf) -> u8 {
 }
 
 impl Tree {
-    pub fn insert(&mut self, index: u32, all_positions: &[Vectorf]) {
-        if self.root.is_none() {
-            self.root = Some(Node::Final {
+    pub fn insert(
+        &mut self,
+        index: NonZeroU32,
+        all_positions: &[Vectorf],
+        arena: &mut Vec<[RawIndex; 8]>,
+    ) {
+        let index = index.get();
+        assert!(index < i32::MAX as u32);
+
+        if self.root == NULL_IDX {
+            self.root = Node::Final {
                 particle_idx: index,
-            });
+            }
+            .raw();
             return;
         }
         let root_shift = all_positions[index as usize] - self.mid;
+
         if root_shift.abs().max() > f32::powi(2.0, self.root_level.into()) {
-            let mut children = Box::new([const { None }; 8]);
-            children[usize::from(vector_to_idx(&root_shift))] = self.root.take();
-            let parent = Node::Split { children };
-            self.root = Some(parent);
+            // Entire tree is too small to contain both 'index' and and 'self.root', must increase
+            // root level.
+
+            let child_idx = arena.len() as u32;
+            arena.push([0; 8]);
+            arena[child_idx as usize][usize::from(vector_to_idx(&root_shift))] = self.root;
+            self.root = Node::Split {
+                interm_idx: child_idx,
+            }
+            .raw();
             self.root_level += 1;
         }
 
-        let mut current_node = self.root.as_mut().unwrap();
+        let mut current_node = &mut self.root;
         let mut width = f32::powi(2.0, self.root_level.into());
         let mut mid = self.mid;
 
         loop {
             //dbg!(&self, mid, index, level);
-            let children = match *current_node {
+            let children = match Node::from_raw_index(*current_node).unwrap() {
                 Node::Final { particle_idx } => {
                     if particle_idx == index {
                         unreachable!("already inserted");
                     } else {
-                        *current_node = Node::Split {
-                            children: Default::default(),
-                        };
-                        let &mut Node::Split { ref mut children } = current_node else {
-                            unreachable!()
-                        };
+                        let child_idx = arena.len() as u32;
+                        arena.push([NULL_IDX; 8]);
                         let old_idx = vector_to_idx(&(all_positions[particle_idx as usize] - mid));
+                        arena[child_idx as usize][usize::from(old_idx)] =
+                            Node::Final { particle_idx }.raw();
+
                         //dbg!(old_idx);
-                        children[usize::from(old_idx)] = Some(Node::Final { particle_idx });
-                        children
+                        &mut arena[child_idx as usize]
                     }
                 }
-                Node::Split { ref mut children } => children,
+                Node::Split { interm_idx } => &mut arena[interm_idx as usize],
             };
 
             let aabb_size = width * 0.5;
@@ -73,33 +111,81 @@ impl Tree {
             //dbg!(child_idx);
             let child = &mut children[child_idx];
 
-            if let Some(child) = child {
-                let direction = Vectorf::new(
-                    if child_idx & 1 == 1 { 1.0 } else { -1.0 },
-                    if child_idx & 2 == 2 { 1.0 } else { -1.0 },
-                    if child_idx & 4 == 4 { 1.0 } else { -1.0 },
-                );
-                let child_mid = mid + direction * aabb_size;
-                //dbg!(child_mid);
-                //child.insert(&child_mid, index, aabb_size, all_positions)
-                mid = child_mid;
-                width = aabb_size;
-                current_node = child;
-            } else {
-                *child = Some(Node::Final {
+            if *child == NULL_IDX {
+                *child = Node::Final {
                     particle_idx: index,
-                });
-                break;
+                }
+                .raw();
+                return;
             }
+
+            let direction = Vectorf::new(
+                if child_idx & 1 == 1 { 1.0 } else { -1.0 },
+                if child_idx & 2 == 2 { 1.0 } else { -1.0 },
+                if child_idx & 4 == 4 { 1.0 } else { -1.0 },
+            );
+            let child_mid = mid + direction * aabb_size;
+            //dbg!(child_mid);
+            //child.insert(&child_mid, index, aabb_size, all_positions)
+            mid = child_mid;
+            width = aabb_size;
+            current_node = child;
         }
 
         //self.root.as_mut().unwrap().insert(&self.mid, index, , all_positions);
     }
+    pub fn neighbor_radius_search(
+        &self,
+        particles: &[Vectorf],
+        arena: &[RawIndex; 8],
+    ) -> Vec<(u32, u32)> {
+        // TODO: parallelize
+
+        let mut in_progress = Vec::new();
+
+        match Node::from_raw_index(self.root) {
+            None | Some(Node::Final { .. }) => return Vec::new(),
+            Some(Node::Split { interm_idx }) => {
+                for i in 0..8 {
+                    for j in 0..i {
+                        in_progress.push((interm_idx + i, interm_idx + j));
+                    }
+                }
+            }
+        }
+        todo!();
+
+        let mut pairs = Vec::new();
+        pairs
+    }
 }
 type Vectorf = Vector3<f32>;
 
-fn square(v: Vectorf) -> f32 {
-    v.dot(&v)
+fn naive(particles: &[Vectorf]) -> Vec<(u32, u32)> {
+    let mut pairs = Vec::with_capacity(1024 * 1024 * 1024);
+
+    let now = Instant::now();
+
+    for i in 0..particles.len() {
+        for j in i + 1..particles.len() {
+            if (particles[i] - particles[j]).norm_squared() <= RADIUS * RADIUS {
+                pairs.push((i as u32, j as u32));
+            }
+        }
+    }
+
+    /*for row_res in rows {
+        let row = row_res.context("failed to read row")?;
+    }*/
+
+    // to measure perf
+    core::hint::black_box(&pairs);
+
+    let elapsed = now.elapsed();
+    println!("Naïve: {} pairs", pairs.len());
+    println!("Naïve implementation took {elapsed:?}");
+
+    pairs
 }
 
 fn main() -> Result<()> {
@@ -109,19 +195,21 @@ fn main() -> Result<()> {
             .unwrap_or_else(|| "data/positions_large.xyz".into()),
     )?);
 
-    let particles = {
-        file.lines()
-            .map(|line| -> Result<Vectorf> {
+    let raw_particles = {
+        // reserve index 0 for null sentinel
+        std::iter::once(Ok(Vectorf::repeat(f32::NAN)))
+            .chain(file.lines().map(|line| -> Result<Vectorf> {
                 let line = line?;
                 let mut words = line.split(' ').map(|w| w.parse::<f32>());
                 Ok(Vectorf::new(
                     words.next().context("1st not present")??,
                     words.next().context("2nd not present")??,
                     words.next().context("3rd not present")??,
-                ))
-            })
+                ) / RADIUS)
+            }))
             .collect::<Result<Vec<_>>>()?
     };
+    let particles = &raw_particles[1..];
 
     let max_depth = {
         // Calculate size of the smallest cube that fits all points (without translating or
@@ -129,12 +217,12 @@ fn main() -> Result<()> {
 
         let mut max = Vectorf::zeros();
         let mut min = Vectorf::zeros();
-        for particle in &particles {
+        for particle in particles {
             for coord in 0..3 {
                 if particle[coord] > max[coord] {
-                    max[coord] = particle[coord] / RADIUS;
+                    max[coord] = particle[coord]; // / RADIUS;
                 } else if particle[coord] < max[coord] {
-                    min[coord] = particle[coord] / RADIUS;
+                    min[coord] = particle[coord]; // / RADIUS;
                 }
             }
         }
@@ -158,43 +246,36 @@ fn main() -> Result<()> {
     println!("Tree max depth: {max_depth}");
 
     let mut tree = Tree {
-        root: None,
+        root: NULL_IDX,
         root_level: 0,
         mid: Vectorf::zeros(),
     };
     let now0 = Instant::now();
+
+    // This step is O(n log n). Even when unbalanced, this holds so long as the coordinate type
+    // (int/float) is not infinitely precise (subdivisible).
+
+    // TODO: more efficient guess?
+    let mut arena = Vec::<[RawIndex; 8]>::with_capacity(2 * particles.len());
+    // reserve null index
+    arena.push([0; 8]);
+
     for i in 0..particles.len() {
-        tree.insert(i as u32, &particles);
+        tree.insert(
+            NonZeroU32::new(1 + i as u32).unwrap(),
+            &raw_particles,
+            &mut arena,
+        );
     }
     println!("Built tree in {:?}", now0.elapsed());
     //println!("Tree: {tree:?}");
     core::hint::black_box(tree);
 
     println!("Input: {} coordinates", particles.len());
-    /*
-    let mut pairs = Vec::with_capacity(1024 * 1024 * 1024);
 
-    let now = Instant::now();
+    //tree.neighbors_radius_search();
 
-    for i in 0..particles.len() {
-        for j in i + 1..particles.len() {
-            if square(particles[i] - particles[j]) <= RADIUS * RADIUS {
-                pairs.push((i as u32, j as u32));
-            }
-        }
-    }
-
-    /*for row_res in rows {
-        let row = row_res.context("failed to read row")?;
-    }*/
-
-    // to measure perf
-    core::hint::black_box(&pairs);
-
-    let elapsed = now.elapsed();
-    println!("Naïve: {} pairs", pairs.len());
-    println!("Naïve implementation took {elapsed:?}");
-    */
+    //let _ = naive(&particles);
 
     Ok(())
 }
