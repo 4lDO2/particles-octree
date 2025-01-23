@@ -32,7 +32,7 @@ impl Tree {
             return;
         }
         let root_shift = all_positions[index as usize] - self.mid;
-        if root_shift.abs() > Vectorf::repeat(f32::powi(2.0, self.root_level.into())) {
+        if root_shift.abs().max() > f32::powi(2.0, self.root_level.into()) {
             let mut children = Box::new([const { None }; 8]);
             children[usize::from(vector_to_idx(&root_shift))] = self.root.take();
             let parent = Node::Split { children };
@@ -44,20 +44,24 @@ impl Tree {
 }
 impl Node {
     pub fn insert(&mut self, mid: &Vectorf, index: u32, level: i8, positions: &[Vectorf]) {
+        //dbg!(&self, mid, index, level);
         let children = match *self {
             Node::Final { particle_idx } => if particle_idx == index {
                 unreachable!("already inserted");
             } else {
                 *self = Node::Split { children: Default::default() };
                 let &mut Node::Split { ref mut children } = self else { unreachable!() };
-                children[usize::from(vector_to_idx(&(positions[particle_idx as usize] - mid)))] = Some(Node::Final { particle_idx });
+                let old_idx = vector_to_idx(&(positions[particle_idx as usize] - mid));
+                //dbg!(old_idx);
+                children[usize::from(old_idx)] = Some(Node::Final { particle_idx });
                 children
             }
             Node::Split { ref mut children } => children,
         };
 
-        let aabb_size = f32::powi(2.0, level.into());
+        let aabb_size = f32::powi(2.0, (level - 1).into());
         let child_idx = usize::from(vector_to_idx(&(positions[index as usize] - mid)));
+        //dbg!(child_idx);
         let child = &mut children[child_idx];
 
         if let Some(child) = child {
@@ -66,7 +70,9 @@ impl Node {
                 if child_idx & 2 == 2 { 1.0 } else { -1.0 },
                 if child_idx & 4 == 4 { 1.0 } else { -1.0 },
             );
-            child.insert(&(mid + direction * aabb_size), index, level - 1, positions)
+            let child_mid = mid + direction * aabb_size;
+            //dbg!(child_mid);
+            child.insert(&child_mid, index, level - 1, positions)
         } else {
             *child = Some(Node::Final { particle_idx: index });
         }
@@ -81,10 +87,9 @@ fn square(v: Vectorf) -> f32 {
 
 fn main() -> Result<()> {
     let file = BufReader::new(File::open(
-        /*std::env::args()
+        std::env::args()
             .nth(1)
-            .context("expected input file as argument")?,*/
-        "data/positions_large.xyz",
+            .unwrap_or_else(|| "data/positions_large.xyz".into()),
     )?);
 
     let particles = {
@@ -132,9 +137,11 @@ fn main() -> Result<()> {
     };
     let now0 = Instant::now();
     for i in 0..particles.len() {
+        println!("Inserting {i}");
         tree.insert(i as u32, &particles);
     }
     println!("Built tree in {:?}", now0.elapsed());
+    println!("Tree: {tree:?}");
     core::hint::black_box(tree);
 
     println!("Input: {} coordinates", particles.len());
