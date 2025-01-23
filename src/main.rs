@@ -28,7 +28,9 @@ fn vector_to_idx(vector: &Vectorf) -> u8 {
 impl Tree {
     pub fn insert(&mut self, index: u32, all_positions: &[Vectorf]) {
         if self.root.is_none() {
-            self.root = Some(Node::Final { particle_idx: index });
+            self.root = Some(Node::Final {
+                particle_idx: index,
+            });
             return;
         }
         let root_shift = all_positions[index as usize] - self.mid;
@@ -39,46 +41,61 @@ impl Tree {
             self.root = Some(parent);
             self.root_level += 1;
         }
-        self.root.as_mut().unwrap().insert(&self.mid, index, self.root_level, all_positions);
-    }
-}
-impl Node {
-    pub fn insert(&mut self, mid: &Vectorf, index: u32, level: i8, positions: &[Vectorf]) {
-        //dbg!(&self, mid, index, level);
-        let children = match *self {
-            Node::Final { particle_idx } => if particle_idx == index {
-                unreachable!("already inserted");
+
+        let mut current_node = self.root.as_mut().unwrap();
+        let mut width = f32::powi(2.0, self.root_level.into());
+        let mut mid = self.mid;
+
+        loop {
+            //dbg!(&self, mid, index, level);
+            let children = match *current_node {
+                Node::Final { particle_idx } => {
+                    if particle_idx == index {
+                        unreachable!("already inserted");
+                    } else {
+                        *current_node = Node::Split {
+                            children: Default::default(),
+                        };
+                        let &mut Node::Split { ref mut children } = current_node else {
+                            unreachable!()
+                        };
+                        let old_idx = vector_to_idx(&(all_positions[particle_idx as usize] - mid));
+                        //dbg!(old_idx);
+                        children[usize::from(old_idx)] = Some(Node::Final { particle_idx });
+                        children
+                    }
+                }
+                Node::Split { ref mut children } => children,
+            };
+
+            let aabb_size = width * 0.5;
+            let child_idx = usize::from(vector_to_idx(&(all_positions[index as usize] - mid)));
+            //dbg!(child_idx);
+            let child = &mut children[child_idx];
+
+            if let Some(child) = child {
+                let direction = Vectorf::new(
+                    if child_idx & 1 == 1 { 1.0 } else { -1.0 },
+                    if child_idx & 2 == 2 { 1.0 } else { -1.0 },
+                    if child_idx & 4 == 4 { 1.0 } else { -1.0 },
+                );
+                let child_mid = mid + direction * aabb_size;
+                //dbg!(child_mid);
+                //child.insert(&child_mid, index, aabb_size, all_positions)
+                mid = child_mid;
+                width = aabb_size;
+                current_node = child;
             } else {
-                *self = Node::Split { children: Default::default() };
-                let &mut Node::Split { ref mut children } = self else { unreachable!() };
-                let old_idx = vector_to_idx(&(positions[particle_idx as usize] - mid));
-                //dbg!(old_idx);
-                children[usize::from(old_idx)] = Some(Node::Final { particle_idx });
-                children
+                *child = Some(Node::Final {
+                    particle_idx: index,
+                });
+                break;
             }
-            Node::Split { ref mut children } => children,
-        };
-
-        let aabb_size = f32::powi(2.0, (level - 1).into());
-        let child_idx = usize::from(vector_to_idx(&(positions[index as usize] - mid)));
-        //dbg!(child_idx);
-        let child = &mut children[child_idx];
-
-        if let Some(child) = child {
-            let direction = Vectorf::new(
-                if child_idx & 1 == 1 { 1.0 } else { -1.0 },
-                if child_idx & 2 == 2 { 1.0 } else { -1.0 },
-                if child_idx & 4 == 4 { 1.0 } else { -1.0 },
-            );
-            let child_mid = mid + direction * aabb_size;
-            //dbg!(child_mid);
-            child.insert(&child_mid, index, level - 1, positions)
-        } else {
-            *child = Some(Node::Final { particle_idx: index });
         }
+
+        //self.root.as_mut().unwrap().insert(&self.mid, index, , all_positions);
     }
 }
-
 type Vectorf = Vector3<f32>;
 
 fn square(v: Vectorf) -> f32 {
@@ -93,15 +110,17 @@ fn main() -> Result<()> {
     )?);
 
     let particles = {
-        file.lines().map(|line| -> Result<Vectorf> {
-            let line = line?;
-            let mut words = line.split(' ').map(|w| w.parse::<f32>());
-            Ok(Vectorf::new(
-                words.next().context("1st not present")??,
-                words.next().context("2nd not present")??,
-                words.next().context("3rd not present")??,
-            ))
-        }).collect::<Result<Vec<_>>>()?
+        file.lines()
+            .map(|line| -> Result<Vectorf> {
+                let line = line?;
+                let mut words = line.split(' ').map(|w| w.parse::<f32>());
+                Ok(Vectorf::new(
+                    words.next().context("1st not present")??,
+                    words.next().context("2nd not present")??,
+                    words.next().context("3rd not present")??,
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?
     };
 
     let max_depth = {
@@ -121,12 +140,20 @@ fn main() -> Result<()> {
         }
         let min = min.map(|m| (m.floor() as i32).min(0));
         let max = max.map(|m| (m.ceil() as i32).max(0));
-        println!("Bounds: {} {} {}, {} {} {}", min[0], min[1], min[2], max[0], max[1], max[2]);
+        println!(
+            "Bounds: {} {} {}, {} {} {}",
+            min[0], min[1], min[2], max[0], max[1], max[2]
+        );
 
-        max.iter().copied().chain(min.iter().copied())
+        max.iter()
+            .copied()
+            .chain(min.iter().copied())
             .map(|coord| coord.abs() as u32)
-            .max().unwrap_or(0).next_power_of_two().trailing_zeros() + 1
-
+            .max()
+            .unwrap_or(0)
+            .next_power_of_two()
+            .trailing_zeros()
+            + 1
     };
     println!("Tree max depth: {max_depth}");
 
