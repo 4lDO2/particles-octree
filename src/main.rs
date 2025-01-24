@@ -38,12 +38,16 @@ impl Node {
 struct Tree {
     root: RawIndex,
     root_level: i8,
+    deepest: i8,
     mid: Vectorf,
+    mw: Coord,
+    len: u32,
 }
 type RawIndex = i32;
+type Coord = f32;
 const NULL_IDX: RawIndex = 0;
 
-const RADIUS: f32 = 0.05;
+const RADIUS: Coord = 0.05;
 
 fn vector_to_idx(vector: &Vectorf) -> u8 {
     u8::from(vector.x >= 0.0) | (u8::from(vector.y >= 0.0) << 1) | (u8::from(vector.z >= 0.0) << 2)
@@ -64,11 +68,14 @@ impl Tree {
                 particle_idx: index,
             }
             .raw();
+            self.len += 1;
             return;
         }
         let root_shift = all_positions[index as usize] - self.mid;
 
-        if root_shift.abs().max() > f32::powi(2.0, self.root_level.into()) {
+        let mut level = self.root_level;
+
+        if root_shift.abs().max() > Coord::powi(2.0, self.root_level.into()) {
             // Entire tree is too small to contain both 'index' and and 'self.root', must increase
             // root level.
 
@@ -83,7 +90,7 @@ impl Tree {
         }
 
         let mut current_node = &mut self.root;
-        let mut width = f32::powi(2.0, self.root_level.into());
+        let mut width = Coord::powi(2.0, self.root_level.into());
         let mut mid = self.mid;
 
         loop {
@@ -116,6 +123,7 @@ impl Tree {
                     particle_idx: index,
                 }
                 .raw();
+                self.len += 1;
                 return;
             }
 
@@ -124,10 +132,10 @@ impl Tree {
                 if child_idx & 2 == 2 { 1.0 } else { -1.0 },
                 if child_idx & 4 == 4 { 1.0 } else { -1.0 },
             );
-            let child_mid = mid + direction * aabb_size;
-            //dbg!(child_mid);
-            //child.insert(&child_mid, index, aabb_size, all_positions)
-            mid = child_mid;
+            level -= 1;
+            self.deepest = self.deepest.min(level);
+            self.mw = self.mw.min(aabb_size);
+            mid += direction * aabb_size;
             width = aabb_size;
             current_node = child;
         }
@@ -156,7 +164,7 @@ impl Tree {
         }
 
         let mut pairs = Vec::new();
-        let mut granularity = f32::powi(2.0, self.root_level.into());
+        let mut granularity = Coord::powi(2.0, self.root_level.into());
         loop {
             for (p, q) in in_progress.drain(..) {
                 match (Node::from_raw_index(p), Node::from_raw_index(q)) {
@@ -164,6 +172,11 @@ impl Tree {
                     (Some(Node::Split { interm_idx: i1 }), Some(Node::Split { interm_idx: i2 })) => {
                         // Append Cartesian product of respective subnodes, filtering out the ones
                         // that cannot be within range at all.
+                        let p1 = particles[i1 as usize];
+                        let p2 = particles[i2 as usize];
+
+                        //let diff = p2 - p1;
+                        //let diag = diff.component_div(diff.abs());
                     }
                     (Some(Node::Final { particle_idx }), Some(Node::Split { interm_idx })) | (Some(Node::Split { interm_idx }), Some(Node::Final { particle_idx })) => {
                         // Append (_, single) coset.
@@ -186,7 +199,7 @@ impl Tree {
         pairs
     }
 }
-type Vectorf = Vector3<f32>;
+type Vectorf = Vector3<Coord>;
 
 fn naive(particles: &[Vectorf]) -> Vec<(u32, u32)> {
     let mut pairs = Vec::with_capacity(1024 * 1024 * 1024);
@@ -224,10 +237,10 @@ fn main() -> Result<()> {
 
     let raw_particles = {
         // reserve index 0 for null sentinel
-        std::iter::once(Ok(Vectorf::repeat(f32::NAN)))
+        std::iter::once(Ok(Vectorf::repeat(Coord::NAN)))
             .chain(file.lines().map(|line| -> Result<Vectorf> {
                 let line = line?;
-                let mut words = line.split(' ').map(|w| w.parse::<f32>());
+                let mut words = line.split(' ').map(|w| w.parse::<Coord>());
                 Ok(Vectorf::new(
                     words.next().context("1st not present")??,
                     words.next().context("2nd not present")??,
@@ -275,7 +288,10 @@ fn main() -> Result<()> {
     let mut tree = Tree {
         root: NULL_IDX,
         root_level: 0,
+        mw: Coord::INFINITY,
         mid: Vectorf::zeros(),
+        deepest: 0,
+        len: 0,
     };
     let now0 = Instant::now();
 
@@ -295,6 +311,7 @@ fn main() -> Result<()> {
         );
     }
     println!("Built tree in {:?}", now0.elapsed());
+    println!("+lvl {} -lvl {}, {}, len {}", tree.root_level, tree.deepest, tree.mw, tree.len);
     //println!("Tree: {tree:?}");
     core::hint::black_box(&tree);
 
