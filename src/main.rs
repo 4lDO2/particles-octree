@@ -149,6 +149,14 @@ impl Tree {
     ) -> Vec<(u32, u32)> {
         // TODO: parallelize
 
+        #[derive(Debug)]
+        struct InProgress {
+            p1: RawIndex,
+            addr1: Vector3<i32>,
+            p2: RawIndex,
+            addr2: Vector3<i32>,
+        }
+
         let mut in_progress = Vec::new();
         let mut next_in_progress = Vec::new();
 
@@ -157,31 +165,64 @@ impl Tree {
             Some(Node::Split { interm_idx }) => {
                 for i in 0..8_usize {
                     for j in 0..i {
-                        in_progress.push((arena[interm_idx as usize][i], arena[interm_idx as usize][j]));
+                        let c = |w, b| {
+                            (if w & (1_usize << b) == 0_usize { -1 } else { 1 })
+                                << (self.root_level - self.deepest)
+                        };
+                        in_progress.push(InProgress {
+                            p1: arena[interm_idx as usize][i],
+                            addr1: Vector3::new(c(i, 0), c(i, 1), c(i, 2)),
+                            p2: arena[interm_idx as usize][j],
+                            addr2: Vector3::new(c(j, 0), c(j, 1), c(j, 2)),
+                        });
                     }
                 }
             }
         }
 
         let mut pairs = Vec::new();
-        let mut granularity = Coord::powi(2.0, self.root_level.into());
         loop {
-            for (p, q) in in_progress.drain(..) {
-                match (Node::from_raw_index(p), Node::from_raw_index(q)) {
+            for InProgress {
+                p1,
+                addr1,
+                p2,
+                addr2,
+            } in in_progress.drain(..)
+            {
+                match (Node::from_raw_index(p1), Node::from_raw_index(p2)) {
                     (None, _) | (_, None) => continue,
-                    (Some(Node::Split { interm_idx: i1 }), Some(Node::Split { interm_idx: i2 })) => {
+                    (
+                        Some(Node::Split { interm_idx: i1 }),
+                        Some(Node::Split { interm_idx: i2 }),
+                    ) => {
                         // Append Cartesian product of respective subnodes, filtering out the ones
                         // that cannot be within range at all.
-                        let p1 = particles[i1 as usize];
-                        let p2 = particles[i2 as usize];
 
                         //let diff = p2 - p1;
                         //let diag = diff.component_div(diff.abs());
+                        if (addr2 - addr1).max() << level > 2 {
+                            continue;
+                        }
+                        for i in 0..8 {
+                            for j in 0..i {
+                                next_in_progress.push(InProgress {
+                                    p1: arena[i1][i],
+                                    addr1: addr1,
+                                    p2: arena[i2][j],
+                                    addr2: addr2,
+                                });
+                            }
+                        }
                     }
-                    (Some(Node::Final { particle_idx }), Some(Node::Split { interm_idx })) | (Some(Node::Split { interm_idx }), Some(Node::Final { particle_idx })) => {
-                        // Append (_, single) coset.
+                    (Some(Node::Final { particle_idx }), Some(Node::Split { interm_idx }))
+                    | (Some(Node::Split { interm_idx }), Some(Node::Final { particle_idx })) => {
+                        // Append (_, single) coset. Single particle must be outside the split if
+                        // the tree is valid.
                     }
-                    (Some(Node::Final { particle_idx: f1 }), Some(Node::Final { particle_idx: f2 })) => {
+                    (
+                        Some(Node::Final { particle_idx: f1 }),
+                        Some(Node::Final { particle_idx: f2 }),
+                    ) => {
                         if (particles[f1 as usize] - particles[f2 as usize]).norm_squared() <= 1.0 {
                             pairs.push((f1, f2));
                         }
@@ -311,7 +352,10 @@ fn main() -> Result<()> {
         );
     }
     println!("Built tree in {:?}", now0.elapsed());
-    println!("+lvl {} -lvl {}, {}, len {}", tree.root_level, tree.deepest, tree.mw, tree.len);
+    println!(
+        "+lvl {} -lvl {}, {}, len {}",
+        tree.root_level, tree.deepest, tree.mw, tree.len
+    );
     //println!("Tree: {tree:?}");
     core::hint::black_box(&tree);
 
