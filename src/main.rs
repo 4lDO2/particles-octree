@@ -87,27 +87,19 @@ impl Tree {
                 for i in 0..8 {
                     for p in &sub[i] {
                         let p = *p as usize;
-                        //println!("Validating({i}) {p:?} {:?} nlvl {next_gran}", particles[p]);
-                        //println!("Mid {middle:?}");
                         let xbounds = if i & 1 == 1 {
-                            //assert!(particles[p].x >= middle.x);
                             middle.x..middle.x + next_gran * 2.0
                         } else {
-                            //assert!(particles[p].x < middle.x);
                             middle.x - next_gran * 2.0..middle.x
                         };
                         let ybounds = if i & 2 == 2 {
-                            //assert!(particles[p].x >= middle.x);
                             middle.y..middle.y + next_gran * 2.0
                         } else {
-                            //assert!(particles[p].x < middle.x);
                             middle.y - next_gran * 2.0..middle.y
                         };
                         let zbounds = if i & 4 == 4 {
-                            //assert!(particles[p].x >= middle.x);
                             middle.z..middle.z + next_gran * 2.0
                         } else {
-                            //assert!(particles[p].x < middle.x);
                             middle.z - next_gran * 2.0..middle.z
                         };
                         assert!(xbounds.contains(&particles[p].x));
@@ -259,25 +251,8 @@ impl Tree {
         let mut in_progress = Vec::new();
         let mut next_in_progress = Vec::new();
 
-        /*match Node::from_raw_index(self.root) {
-            None | Some(Node::Final { .. }) => return Vec::new(),
-            Some(Node::Split { interm_idx }) => {
-                for i in 0..8_usize {
-                    for j in 0..=i {
-                        let c = |w, b| {
-                            (if w & (1_usize << b) == 0_usize { -1 } else { 1 })
-                                << (self.root_level - self.deepest)
-                        };
-                        in_progress.push(InProgress {
-                            p1: arena[interm_idx as usize][i],
-                            addr1: Vector3::new(c(i, 0), c(i, 1), c(i, 2)),
-                            p2: arena[interm_idx as usize][j],
-                            addr2: Vector3::new(c(j, 0), c(j, 1), c(j, 2)),
-                        });
-                    }
-                }
-            }
-        }*/
+        let mut width = Coord::powi(2.0, self.root_level.into());
+
         in_progress.push(InProgress {
             p1: self.root,
             mid1: self.mid,
@@ -286,17 +261,17 @@ impl Tree {
         });
 
         let mut pairs = Vec::new();
-        let mut width = Coord::powi(2.0, self.root_level.into());
 
         let filter_point = |next: &mut Vec<InProgress>,
                             interm_idx,
                             particle_idx,
                             split_mid: Vectorf,
                             width: Coord| {
-            //println!("s{interm_idx} p{particle_idx}");
             // Append (_, single) coset. Single particle must be outside the split if
             // the tree is valid.
-            if (particles[particle_idx as usize] - split_mid).norm_squared() > 9.0 * (width * width).max(1.0) {
+            if (particles[particle_idx as usize] - split_mid).norm_squared()
+                > 9.0 * (width * width).max(1.0)
+            {
                 return;
             }
 
@@ -323,24 +298,33 @@ impl Tree {
                         Some(Node::Split { interm_idx: i2 }),
                     ) => {
                         // Append Cartesian product of respective subnodes, filtering out the ones
-                        // that cannot be within range at all.
+                        // that cannot be within range at all. We don't necessarily need to
+                        // calculate the exact minimum distance between the cubes, as long as a
+                        // valid approximation is used.
 
                         let diff = mid2 - mid1;
                         if diff.norm_squared() >= 16.0 * (width * width).max(1.0) {
                             continue;
                         }
-                        /*let diag = diff.component_div(&diff.abs()) * width * 2.0;
-                        if (diff + diag).norm_squared() > 1.0 {
-                            //println!("reject {mid1:?}:{mid2:?}, width {width:?}, diag {diag:?}");
-                            //continue;
-                        }*/
 
                         for i in 0..8 {
+                            let j_range = if i1 == i2 {
+                                // node onto itself
+                                i..8
+                            } else {
+                                // independent nodes
+                                0..8
+                            };
+
                             let p1 = arena[i1 as usize][i as usize];
-                            if p1 == 0 { continue }
-                            for j in 0..8 {
+                            if p1 == 0 {
+                                continue;
+                            }
+                            for j in j_range {
                                 let p2 = arena[i2 as usize][j as usize];
-                                if p2 == 0 { continue }
+                                if p2 == 0 {
+                                    continue;
+                                }
                                 next_in_progress.push(InProgress {
                                     p1,
                                     mid1: mid1 + idx_to_vector(i) * width * 0.5,
@@ -360,7 +344,6 @@ impl Tree {
                         Some(Node::Final { particle_idx: f1 }),
                         Some(Node::Final { particle_idx: f2 }),
                     ) => {
-                        //println!("f{f1} f{f2}");
                         if (particles[f1 as usize] - particles[f2 as usize]).norm_squared() <= 1.0 {
                             pairs.push((f1, f2));
                         }
@@ -463,7 +446,6 @@ fn main() -> Result<()> {
             .unwrap_or(0)
             .next_power_of_two()
             .trailing_zeros()
-        //+ 1
     };
     println!("Tree max depth: {max_depth}");
 
@@ -486,14 +468,11 @@ fn main() -> Result<()> {
     arena.push([0; 8]);
 
     for i in 0..particles.len() {
-        //println!("Inserting {}: {:?}", i + 1, particles[i]);
         tree.insert(
             NonZeroU32::new(1 + i as u32).unwrap(),
             &raw_particles,
             &mut arena,
         );
-        //println!("Tree: {tree:?}");
-        //println!("Arena: {:?}", &arena[1..]);
     }
     //Tree::validate(tree.root, tree.mid, Coord::powi(2.0, tree.root_level.into()) * 0.5, &mut Vec::new(), &raw_particles, &arena);
     println!("Built tree in {:?}", now0.elapsed());
@@ -515,8 +494,7 @@ fn main() -> Result<()> {
         "+lvl {} -lvl {}, deepest {}, len {}",
         tree.root_level, tree.deepest, tree.mw, tree.len
     );
-    //println!("Tree: {tree:?}");
-    core::hint::black_box(&tree);
+    let _ = core::hint::black_box(&tree);
 
     println!("Input: {} coordinates", particles.len());
 
@@ -546,7 +524,7 @@ fn main() -> Result<()> {
     for (p, q) in pairs_naive.iter().zip(pairs2.iter()) {
         assert_eq!(*p, *q);
     }
-    assert_eq!(pairs.len(), pairs_naive.len());
+    assert_eq!(pairs2.len(), pairs_naive.len());
 
     Ok(())
 }
