@@ -181,6 +181,8 @@ impl Tree {
         }
 
         let mut pairs = Vec::new();
+        let mut level = 0;
+
         loop {
             for InProgress {
                 p1,
@@ -206,9 +208,9 @@ impl Tree {
                         for i in 0..8 {
                             for j in 0..i {
                                 next_in_progress.push(InProgress {
-                                    p1: arena[i1][i],
+                                    p1: arena[i1 as usize][i as usize],
                                     addr1: addr1,
-                                    p2: arena[i2][j],
+                                    p2: arena[i2 as usize][j as usize],
                                     addr2: addr2,
                                 });
                             }
@@ -218,6 +220,14 @@ impl Tree {
                     | (Some(Node::Split { interm_idx }), Some(Node::Final { particle_idx })) => {
                         // Append (_, single) coset. Single particle must be outside the split if
                         // the tree is valid.
+                        for i in 0..8 {
+                            next_in_progress.push(InProgress {
+                                p1: arena[interm_idx as usize][i as usize],
+                                addr1: addr1,
+                                p2: particle_idx as i32,
+                                addr2: addr2,
+                            });
+                        }
                     }
                     (
                         Some(Node::Final { particle_idx: f1 }),
@@ -229,7 +239,7 @@ impl Tree {
                     }
                 }
             }
-            granularity *= 0.5;
+            level -= 1;
             if next_in_progress.is_empty() {
                 break;
             }
