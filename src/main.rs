@@ -52,8 +52,49 @@ const RADIUS: Coord = 0.05;
 fn vector_to_idx(vector: &Vectorf) -> u8 {
     u8::from(vector.x >= 0.0) | (u8::from(vector.y >= 0.0) << 1) | (u8::from(vector.z >= 0.0) << 2)
 }
+fn idx_to_vector(idx: u8) -> Vectorf {
+    Vectorf::new(if idx & 1 == 1 { 1.0 } else { -1.0 }, if idx & 2 == 2 { 1.0 } else { -1.0 }, if idx & 4 == 4 { 1.0 } else { -1.0 })
+}
 
 impl Tree {
+    fn validate(node: RawIndex, middle: Vectorf, next_gran: f32, all: &mut Vec<u32>, particles: &[Vectorf], arena: &[[RawIndex; 8]]) {
+        match Node::from_raw_index(node) {
+            None => (),
+            Some(Node::Split { interm_idx }) => {
+                let mut sub = [const { Vec::new() }; 8];
+                for i in 0..8 {
+                    Self::validate(arena[interm_idx as usize][i], middle + idx_to_vector(i as u8) * next_gran, next_gran * 0.5, &mut sub[i], particles, arena);
+                }
+                for i in 0..8 {
+                    for p in &sub[i] {
+                        let p = *p as usize;
+                        println!("Validating {p:?} nlvl {next_gran}");
+                        if i & 1 == 1 {
+                            assert!(particles[p].x >= middle.x);
+                        } else {
+                            assert!(particles[p].x < middle.x);
+                        }
+                        if i & 2 == 2 {
+                            assert!(particles[p].y >= middle.y);
+                        } else {
+                            assert!(particles[p].y < middle.y);
+                        }
+                        if i & 4 == 4 {
+                            assert!(particles[p].z >= middle.z);
+                        } else {
+                            assert!(particles[p].z < middle.z);
+                        }
+                    }
+                }
+                for mut s in sub {
+                    all.append(&mut s);
+                }
+            }
+            Some(Node::Final { particle_idx }) => {
+                all.push(particle_idx);
+            }
+        };
+    }
     pub fn insert(
         &mut self,
         index: NonZeroU32,
@@ -76,8 +117,9 @@ impl Tree {
         let mut level = self.root_level;
 
         if root_shift.abs().max() > Coord::powi(2.0, self.root_level.into()) {
-            // Entire tree is too small to contain both 'index' and and 'self.root', must increase
-            // root level.
+            /*println!("upwards");
+            // Entire tree is too small to contain both 'index' and 'self.root', must increase root
+            // level.
 
             let child_idx = arena.len() as u32;
             arena.push([0; 8]);
@@ -87,10 +129,12 @@ impl Tree {
             }
             .raw();
             self.root_level += 1;
+            return;*/
+            unreachable!();
         }
 
         let mut current_node = &mut self.root;
-        let mut width = Coord::powi(2.0, self.root_level.into());
+        let mut width = Coord::powi(2.0, self.root_level.into()) * 0.5;
         let mut mid = self.mid;
 
         loop {
@@ -101,6 +145,8 @@ impl Tree {
                         unreachable!("already inserted");
                     } else {
                         let child_idx = arena.len() as u32;
+                        *current_node = Node::Split { interm_idx: child_idx }.raw();
+
                         arena.push([NULL_IDX; 8]);
                         let old_idx = vector_to_idx(&(all_positions[particle_idx as usize] - mid));
                         arena[child_idx as usize][usize::from(old_idx)] =
@@ -160,11 +206,11 @@ impl Tree {
         let mut in_progress = Vec::new();
         let mut next_in_progress = Vec::new();
 
-        match Node::from_raw_index(self.root) {
+        /*match Node::from_raw_index(self.root) {
             None | Some(Node::Final { .. }) => return Vec::new(),
             Some(Node::Split { interm_idx }) => {
                 for i in 0..8_usize {
-                    for j in 0..i {
+                    for j in 0..=i {
                         let c = |w, b| {
                             (if w & (1_usize << b) == 0_usize { -1 } else { 1 })
                                 << (self.root_level - self.deepest)
@@ -178,10 +224,16 @@ impl Tree {
                     }
                 }
             }
-        }
+        }*/
+        in_progress.push(InProgress {
+            p1: self.root,
+            addr1: Vector3::zeros(),
+            p2: self.root,
+            addr2: Vector3::zeros(),
+        });
 
         let mut pairs = Vec::new();
-        let mut level = 0;
+        let mut level = self.root_level;
 
         loop {
             for InProgress {
@@ -197,16 +249,17 @@ impl Tree {
                         Some(Node::Split { interm_idx: i1 }),
                         Some(Node::Split { interm_idx: i2 }),
                     ) => {
+                        println!("s{i1} s{i2}");
                         // Append Cartesian product of respective subnodes, filtering out the ones
                         // that cannot be within range at all.
 
                         //let diff = p2 - p1;
                         //let diag = diff.component_div(diff.abs());
-                        if (addr2 - addr1).max() << level > 2 {
+                        /*if (addr2 - addr1).max() << level > 2 {
                             continue;
-                        }
+                        }*/
                         for i in 0..8 {
-                            for j in 0..i {
+                            for j in 0..8 {
                                 next_in_progress.push(InProgress {
                                     p1: arena[i1 as usize][i as usize],
                                     addr1: addr1,
@@ -218,6 +271,7 @@ impl Tree {
                     }
                     (Some(Node::Final { particle_idx }), Some(Node::Split { interm_idx }))
                     | (Some(Node::Split { interm_idx }), Some(Node::Final { particle_idx })) => {
+                        println!("s{interm_idx} p{particle_idx}");
                         // Append (_, single) coset. Single particle must be outside the split if
                         // the tree is valid.
                         for i in 0..8 {
@@ -233,6 +287,7 @@ impl Tree {
                         Some(Node::Final { particle_idx: f1 }),
                         Some(Node::Final { particle_idx: f2 }),
                     ) => {
+                        println!("f{f1} f{f2}");
                         if (particles[f1 as usize] - particles[f2 as usize]).norm_squared() <= 1.0 {
                             pairs.push((f1, f2));
                         }
@@ -259,7 +314,7 @@ fn naive(particles: &[Vectorf]) -> Vec<(u32, u32)> {
 
     for i in 0..particles.len() {
         for j in i + 1..particles.len() {
-            if (particles[i] - particles[j]).norm_squared() <= RADIUS * RADIUS {
+            if (particles[i] - particles[j]).norm_squared() <= /*RADIUS * RADIUS*/ 1.0 {
                 pairs.push((i as u32, j as u32));
             }
         }
@@ -338,7 +393,7 @@ fn main() -> Result<()> {
 
     let mut tree = Tree {
         root: NULL_IDX,
-        root_level: 0,
+        root_level: max_depth as i8,
         mw: Coord::INFINITY,
         mid: Vectorf::zeros(),
         deepest: 0,
@@ -355,11 +410,15 @@ fn main() -> Result<()> {
     arena.push([0; 8]);
 
     for i in 0..particles.len() {
+        //println!("Inserting {i}: {:?}", particles[i]);
         tree.insert(
             NonZeroU32::new(1 + i as u32).unwrap(),
             &raw_particles,
             &mut arena,
         );
+        //println!("Tree: {tree:?}");
+        //println!("Arena: {:?}", &arena[1..]);
+        Tree::validate(tree.root, tree.mid, f32::powi(2.0, tree.root_level.into()), &mut Vec::new(), particles, &arena);
     }
     println!("Built tree in {:?}", now0.elapsed());
     println!(
@@ -373,6 +432,7 @@ fn main() -> Result<()> {
 
     println!("Running fast search");
     let now2 = Instant::now();
+    let _ = core::hint::black_box(&arena);
     let res = tree.neighbor_radius_search(&particles, &arena);
     core::hint::black_box(res);
     println!("Fast search took {:?}", now2.elapsed());
