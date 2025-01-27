@@ -1,4 +1,5 @@
 #![feature(let_chains)]
+#![forbid(unsafe_code)]
 
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -68,8 +69,8 @@ impl Tree {
                 for i in 0..8 {
                     for p in &sub[i] {
                         let p = *p as usize;
-                        println!("Validating({i}) {p:?} {:?} nlvl {next_gran}", particles[p]);
-                        println!("Mid {middle:?}");
+                        //println!("Validating({i}) {p:?} {:?} nlvl {next_gran}", particles[p]);
+                        //println!("Mid {middle:?}");
                         if i & 1 == 1 {
                             assert!(particles[p].x >= middle.x);
                         } else {
@@ -210,9 +211,9 @@ impl Tree {
         #[derive(Debug)]
         struct InProgress {
             p1: RawIndex,
-            addr1: Vector3<i32>,
+            mid1: Vectorf,
             p2: RawIndex,
-            addr2: Vector3<i32>,
+            mid2: Vectorf,
         }
 
         let mut in_progress = Vec::new();
@@ -239,20 +240,21 @@ impl Tree {
         }*/
         in_progress.push(InProgress {
             p1: self.root,
-            addr1: Vector3::zeros(),
+            mid1: self.mid,
             p2: self.root,
-            addr2: Vector3::zeros(),
+            mid2: self.mid,
         });
 
         let mut pairs = Vec::new();
-        let mut level = self.root_level;
+        let mut width = f32::powi(2.0, self.root_level.into());
 
+        let mut total_pairs = 0;
         loop {
             for InProgress {
                 p1,
-                addr1,
+                mid1,
                 p2,
-                addr2,
+                mid2,
             } in in_progress.drain(..)
             {
                 match (Node::from_raw_index(p1), Node::from_raw_index(p2)) {
@@ -261,37 +263,37 @@ impl Tree {
                         Some(Node::Split { interm_idx: i1 }),
                         Some(Node::Split { interm_idx: i2 }),
                     ) => {
-                        println!("s{i1} s{i2}");
                         // Append Cartesian product of respective subnodes, filtering out the ones
                         // that cannot be within range at all.
 
-                        //let diff = p2 - p1;
-                        //let diag = diff.component_div(diff.abs());
-                        /*if (addr2 - addr1).max() << level > 2 {
-                            continue;
-                        }*/
+                        let diff = mid2 - mid1;
+                        let diag = diff.component_div(&diff.abs()) * width * f32::sqrt(2.0);
+                        if (diff + diag).norm() >= 1.0 {
+                            //continue;
+                        }
+
                         for i in 0..8 {
                             for j in 0..8 {
                                 next_in_progress.push(InProgress {
                                     p1: arena[i1 as usize][i as usize],
-                                    addr1: addr1,
+                                    mid1: mid1 + idx_to_vector(i) * width * 0.5,
                                     p2: arena[i2 as usize][j as usize],
-                                    addr2: addr2,
+                                    mid2: mid2 + idx_to_vector(j) * width * 0.5,
                                 });
                             }
                         }
                     }
                     (Some(Node::Final { particle_idx }), Some(Node::Split { interm_idx }))
                     | (Some(Node::Split { interm_idx }), Some(Node::Final { particle_idx })) => {
-                        println!("s{interm_idx} p{particle_idx}");
+                        //println!("s{interm_idx} p{particle_idx}");
                         // Append (_, single) coset. Single particle must be outside the split if
                         // the tree is valid.
                         for i in 0..8 {
                             next_in_progress.push(InProgress {
                                 p1: arena[interm_idx as usize][i as usize],
-                                addr1: addr1,
+                                mid1: mid1 + idx_to_vector(i) * width * 0.5,
                                 p2: particle_idx as i32,
-                                addr2: addr2,
+                                mid2, // ignored from now
                             });
                         }
                     }
@@ -299,21 +301,24 @@ impl Tree {
                         Some(Node::Final { particle_idx: f1 }),
                         Some(Node::Final { particle_idx: f2 }),
                     ) => {
-                        println!("f{f1} f{f2}");
+                        //println!("f{f1} f{f2}");
+                        total_pairs += 1;
                         if (particles[f1 as usize] - particles[f2 as usize]).norm_squared() <= 1.0 {
                             pairs.push((f1, f2));
                         }
                     }
                 }
             }
-            level -= 1;
+            width *= 0.5;
             if next_in_progress.is_empty() {
+                assert!(in_progress.is_empty());
                 break;
             }
             std::mem::swap(&mut in_progress, &mut next_in_progress);
-            next_in_progress.clear();
         }
 
+        //pairs.dedup();
+        dbg!(total_pairs);
         pairs
     }
 }
@@ -325,7 +330,8 @@ fn naive(particles: &[Vectorf]) -> Vec<(u32, u32)> {
     let now = Instant::now();
 
     for i in 0..particles.len() {
-        for j in i + 1..particles.len() {
+        //for j in i + 1..particles.len() {
+        for j in 0..particles.len() {
             if (particles[i] - particles[j]).norm_squared() <= /*RADIUS * RADIUS*/ 1.0 {
                 pairs.push((i as u32, j as u32));
             }
@@ -343,6 +349,8 @@ fn naive(particles: &[Vectorf]) -> Vec<(u32, u32)> {
     println!("Naïve: {} pairs", pairs.len());
     println!("Naïve implementation took {elapsed:?}");
 
+    pairs.dedup();
+
     pairs
 }
 
@@ -350,7 +358,7 @@ fn main() -> Result<()> {
     let file = BufReader::new(File::open(
         std::env::args()
             .nth(1)
-            .unwrap_or_else(|| "data/positions_large.xyz".into()),
+            .unwrap_or_else(|| "data/positions.xyz".into()),
     )?);
 
     let raw_particles = {
@@ -433,6 +441,13 @@ fn main() -> Result<()> {
     }
     //Tree::validate(tree.root, tree.mid, f32::powi(2.0, tree.root_level.into()) * 0.5, &mut Vec::new(), &raw_particles, &arena);
     println!("Built tree in {:?}", now0.elapsed());
+    let mut all = Vec::new();
+    Tree::validate(tree.root, tree.mid, f32::powi(2.0, tree.root_level.into()) * 0.5, &mut all, &raw_particles, &arena);
+    all.sort_unstable();
+    for i in 0..particles.len() {
+        assert_eq!(all[i] as usize, i + 1);
+    }
+    assert_eq!(all.len(), tree.len as usize);
     println!(
         "+lvl {} -lvl {}, {}, len {}",
         tree.root_level, tree.deepest, tree.mw, tree.len
@@ -445,13 +460,12 @@ fn main() -> Result<()> {
     println!("Running fast search");
     let now2 = Instant::now();
     let _ = core::hint::black_box(&arena);
-    /*
-    let res = tree.neighbor_radius_search(&raw_particles, &arena);
-    core::hint::black_box(res);
-    println!("Fast search took {:?}", now2.elapsed());
-    */
+    let pairs = tree.neighbor_radius_search(&raw_particles, &arena);
+    let _ = core::hint::black_box(&pairs);
+    println!("Fast search took {:?}, {} pairs", now2.elapsed(), pairs.len());
 
-    //let _ = naive(&particles);
+    let pairs_naive = naive(&particles);
+    assert_eq!(pairs.len(), pairs_naive.len());
 
     Ok(())
 }
