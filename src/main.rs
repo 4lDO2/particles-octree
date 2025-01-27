@@ -296,13 +296,17 @@ impl Tree {
             //println!("s{interm_idx} p{particle_idx}");
             // Append (_, single) coset. Single particle must be outside the split if
             // the tree is valid.
-            if (particles[particle_idx as usize] - split_mid).norm() > 3.0 * width.max(1.0) {
+            if (particles[particle_idx as usize] - split_mid).norm_squared() > 9.0 * (width * width).max(1.0) {
                 return;
             }
 
             for i in 0..8 {
+                let p1 = arena[interm_idx as usize][i as usize];
+                if p1 == 0 {
+                    continue;
+                }
                 next.push(InProgress {
-                    p1: arena[interm_idx as usize][i as usize],
+                    p1,
                     mid1: split_mid + idx_to_vector(i) * width * 0.5,
                     p2: particle_idx as i32,
                     mid2: Vectorf::zeros(), // ignored from this point
@@ -322,7 +326,7 @@ impl Tree {
                         // that cannot be within range at all.
 
                         let diff = mid2 - mid1;
-                        if diff.norm() >= 4.0 * width.max(1.0) {
+                        if diff.norm_squared() >= 16.0 * (width * width).max(1.0) {
                             continue;
                         }
                         /*let diag = diff.component_div(&diff.abs()) * width * 2.0;
@@ -332,11 +336,15 @@ impl Tree {
                         }*/
 
                         for i in 0..8 {
+                            let p1 = arena[i1 as usize][i as usize];
+                            if p1 == 0 { continue }
                             for j in 0..8 {
+                                let p2 = arena[i2 as usize][j as usize];
+                                if p2 == 0 { continue }
                                 next_in_progress.push(InProgress {
-                                    p1: arena[i1 as usize][i as usize],
+                                    p1,
                                     mid1: mid1 + idx_to_vector(i) * width * 0.5,
-                                    p2: arena[i2 as usize][j as usize],
+                                    p2,
                                     mid2: mid2 + idx_to_vector(j) * width * 0.5,
                                 });
                             }
