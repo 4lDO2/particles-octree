@@ -288,14 +288,16 @@ impl Tree {
         let mut pairs = Vec::new();
         let mut width = Coord::powi(2.0, self.root_level.into());
 
-        let filter_point = |next: &mut Vec<InProgress>, interm_idx, particle_idx, split_mid: Vectorf, width: Coord| {
+        let filter_point = |next: &mut Vec<InProgress>,
+                            interm_idx,
+                            particle_idx,
+                            split_mid: Vectorf,
+                            width: Coord| {
             //println!("s{interm_idx} p{particle_idx}");
             // Append (_, single) coset. Single particle must be outside the split if
             // the tree is valid.
-            if (particles[particle_idx as usize] - split_mid).norm_squared()
-                > (2.0 * width).max(1.0)
-            {
-                //return;
+            if (particles[particle_idx as usize] - split_mid).norm() > 3.0 * width.max(1.0) {
+                return;
             }
 
             for i in 0..8 {
