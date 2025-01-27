@@ -54,38 +54,65 @@ fn vector_to_idx(vector: &Vectorf) -> u8 {
     u8::from(vector.x >= 0.0) | (u8::from(vector.y >= 0.0) << 1) | (u8::from(vector.z >= 0.0) << 2)
 }
 fn idx_to_vector(idx: u8) -> Vectorf {
-    Vectorf::new(if idx & 1 == 1 { 1.0 } else { -1.0 }, if idx & 2 == 2 { 1.0 } else { -1.0 }, if idx & 4 == 4 { 1.0 } else { -1.0 })
+    Vectorf::new(
+        if idx & 1 == 1 { 1.0 } else { -1.0 },
+        if idx & 2 == 2 { 1.0 } else { -1.0 },
+        if idx & 4 == 4 { 1.0 } else { -1.0 },
+    )
 }
 
 impl Tree {
-    fn validate(node: RawIndex, middle: Vectorf, next_gran: f32, all: &mut Vec<u32>, particles: &[Vectorf], arena: &[[RawIndex; 8]]) {
+    fn validate(
+        node: RawIndex,
+        middle: Vectorf,
+        next_gran: Coord,
+        all: &mut Vec<u32>,
+        particles: &[Vectorf],
+        arena: &[[RawIndex; 8]],
+    ) {
         match Node::from_raw_index(node) {
             None => (),
             Some(Node::Split { interm_idx }) => {
                 let mut sub = [const { Vec::new() }; 8];
                 for i in 0..8 {
-                    Self::validate(arena[interm_idx as usize][i], middle + idx_to_vector(i as u8) * next_gran, next_gran * 0.5, &mut sub[i], particles, arena);
+                    Self::validate(
+                        arena[interm_idx as usize][i],
+                        middle + idx_to_vector(i as u8) * next_gran,
+                        next_gran * 0.5,
+                        &mut sub[i],
+                        particles,
+                        arena,
+                    );
                 }
                 for i in 0..8 {
                     for p in &sub[i] {
                         let p = *p as usize;
                         //println!("Validating({i}) {p:?} {:?} nlvl {next_gran}", particles[p]);
                         //println!("Mid {middle:?}");
-                        if i & 1 == 1 {
-                            assert!(particles[p].x >= middle.x);
+                        let xbounds = if i & 1 == 1 {
+                            //assert!(particles[p].x >= middle.x);
+                            middle.x..middle.x + next_gran * 2.0
                         } else {
-                            assert!(particles[p].x < middle.x);
-                        }
-                        if i & 2 == 2 {
-                            assert!(particles[p].y >= middle.y);
+                            //assert!(particles[p].x < middle.x);
+                            middle.x - next_gran * 2.0..middle.x
+                        };
+                        let ybounds = if i & 2 == 2 {
+                            //assert!(particles[p].x >= middle.x);
+                            middle.y..middle.y + next_gran * 2.0
                         } else {
-                            assert!(particles[p].y < middle.y);
-                        }
-                        if i & 4 == 4 {
-                            assert!(particles[p].z >= middle.z);
+                            //assert!(particles[p].x < middle.x);
+                            middle.y - next_gran * 2.0..middle.y
+                        };
+                        let zbounds = if i & 4 == 4 {
+                            //assert!(particles[p].x >= middle.x);
+                            middle.z..middle.z + next_gran * 2.0
                         } else {
-                            assert!(particles[p].z < middle.z);
-                        }
+                            //assert!(particles[p].x < middle.x);
+                            middle.z - next_gran * 2.0..middle.z
+                        };
+                        assert!(xbounds.contains(&particles[p].x));
+                        assert!(ybounds.contains(&particles[p].y));
+                        assert!(zbounds.contains(&particles[p].z));
                     }
                 }
                 for mut s in sub {
@@ -156,8 +183,18 @@ impl Tree {
                     } else {
                         let split_idx = arena.len() as u32;
                         match current_node {
-                            CurrentNode::Root => self.root = Node::Split { interm_idx: split_idx }.raw(),
-                            CurrentNode::Split { interm, child } => arena[interm as usize][child as usize] = Node::Split { interm_idx: split_idx }.raw(),
+                            CurrentNode::Root => {
+                                self.root = Node::Split {
+                                    interm_idx: split_idx,
+                                }
+                                .raw()
+                            }
+                            CurrentNode::Split { interm, child } => {
+                                arena[interm as usize][child as usize] = Node::Split {
+                                    interm_idx: split_idx,
+                                }
+                                .raw()
+                            }
                         }
 
                         arena.push([NULL_IDX; 8]);
@@ -196,7 +233,10 @@ impl Tree {
             self.mw = self.mw.min(aabb_size);
             mid += direction * aabb_size;
             width = aabb_size;
-            current_node = CurrentNode::Split { interm, child: child_idx as u8 };
+            current_node = CurrentNode::Split {
+                interm,
+                child: child_idx as u8,
+            };
         }
 
         //self.root.as_mut().unwrap().insert(&self.mid, index, , all_positions);
@@ -246,17 +286,30 @@ impl Tree {
         });
 
         let mut pairs = Vec::new();
-        let mut width = f32::powi(2.0, self.root_level.into());
+        let mut width = Coord::powi(2.0, self.root_level.into());
 
-        let mut total_pairs = 0;
-        loop {
-            for InProgress {
-                p1,
-                mid1,
-                p2,
-                mid2,
-            } in in_progress.drain(..)
+        let filter_point = |next: &mut Vec<InProgress>, interm_idx, particle_idx, split_mid: Vectorf, width: Coord| {
+            //println!("s{interm_idx} p{particle_idx}");
+            // Append (_, single) coset. Single particle must be outside the split if
+            // the tree is valid.
+            if (particles[particle_idx as usize] - split_mid).norm_squared()
+                > (2.0 * width).max(1.0)
             {
+                //return;
+            }
+
+            for i in 0..8 {
+                next.push(InProgress {
+                    p1: arena[interm_idx as usize][i as usize],
+                    mid1: split_mid + idx_to_vector(i) * width * 0.5,
+                    p2: particle_idx as i32,
+                    mid2: Vectorf::zeros(), // ignored from this point
+                });
+            }
+        };
+
+        loop {
+            for InProgress { p1, mid1, p2, mid2 } in in_progress.drain(..) {
                 match (Node::from_raw_index(p1), Node::from_raw_index(p2)) {
                     (None, _) | (_, None) => continue,
                     (
@@ -267,10 +320,14 @@ impl Tree {
                         // that cannot be within range at all.
 
                         let diff = mid2 - mid1;
-                        let diag = diff.component_div(&diff.abs()) * width * f32::sqrt(2.0);
-                        if (diff + diag).norm() >= 1.0 {
-                            //continue;
+                        if diff.norm() >= 4.0 * width.max(1.0) {
+                            continue;
                         }
+                        /*let diag = diff.component_div(&diff.abs()) * width * 2.0;
+                        if (diff + diag).norm_squared() > 1.0 {
+                            //println!("reject {mid1:?}:{mid2:?}, width {width:?}, diag {diag:?}");
+                            //continue;
+                        }*/
 
                         for i in 0..8 {
                             for j in 0..8 {
@@ -283,26 +340,17 @@ impl Tree {
                             }
                         }
                     }
-                    (Some(Node::Final { particle_idx }), Some(Node::Split { interm_idx }))
-                    | (Some(Node::Split { interm_idx }), Some(Node::Final { particle_idx })) => {
-                        //println!("s{interm_idx} p{particle_idx}");
-                        // Append (_, single) coset. Single particle must be outside the split if
-                        // the tree is valid.
-                        for i in 0..8 {
-                            next_in_progress.push(InProgress {
-                                p1: arena[interm_idx as usize][i as usize],
-                                mid1: mid1 + idx_to_vector(i) * width * 0.5,
-                                p2: particle_idx as i32,
-                                mid2, // ignored from now
-                            });
-                        }
+                    (Some(Node::Final { particle_idx }), Some(Node::Split { interm_idx })) => {
+                        filter_point(&mut next_in_progress, interm_idx, particle_idx, mid2, width);
+                    }
+                    (Some(Node::Split { interm_idx }), Some(Node::Final { particle_idx })) => {
+                        filter_point(&mut next_in_progress, interm_idx, particle_idx, mid1, width);
                     }
                     (
                         Some(Node::Final { particle_idx: f1 }),
                         Some(Node::Final { particle_idx: f2 }),
                     ) => {
                         //println!("f{f1} f{f2}");
-                        total_pairs += 1;
                         if (particles[f1 as usize] - particles[f2 as usize]).norm_squared() <= 1.0 {
                             pairs.push((f1, f2));
                         }
@@ -317,8 +365,6 @@ impl Tree {
             std::mem::swap(&mut in_progress, &mut next_in_progress);
         }
 
-        //pairs.dedup();
-        dbg!(total_pairs);
         pairs
     }
 }
@@ -333,7 +379,7 @@ fn naive(particles: &[Vectorf]) -> Vec<(u32, u32)> {
         //for j in i + 1..particles.len() {
         for j in 0..particles.len() {
             if (particles[i] - particles[j]).norm_squared() <= /*RADIUS * RADIUS*/ 1.0 {
-                pairs.push((i as u32, j as u32));
+                pairs.push((i as u32 + 1, j as u32 + 1));
             }
         }
     }
@@ -407,7 +453,7 @@ fn main() -> Result<()> {
             .unwrap_or(0)
             .next_power_of_two()
             .trailing_zeros()
-            //+ 1
+        //+ 1
     };
     println!("Tree max depth: {max_depth}");
 
@@ -439,17 +485,24 @@ fn main() -> Result<()> {
         //println!("Tree: {tree:?}");
         //println!("Arena: {:?}", &arena[1..]);
     }
-    //Tree::validate(tree.root, tree.mid, f32::powi(2.0, tree.root_level.into()) * 0.5, &mut Vec::new(), &raw_particles, &arena);
+    //Tree::validate(tree.root, tree.mid, Coord::powi(2.0, tree.root_level.into()) * 0.5, &mut Vec::new(), &raw_particles, &arena);
     println!("Built tree in {:?}", now0.elapsed());
     let mut all = Vec::new();
-    Tree::validate(tree.root, tree.mid, f32::powi(2.0, tree.root_level.into()) * 0.5, &mut all, &raw_particles, &arena);
+    Tree::validate(
+        tree.root,
+        tree.mid,
+        Coord::powi(2.0, tree.root_level.into()) * 0.5,
+        &mut all,
+        &raw_particles,
+        &arena,
+    );
     all.sort_unstable();
     for i in 0..particles.len() {
         assert_eq!(all[i] as usize, i + 1);
     }
     assert_eq!(all.len(), tree.len as usize);
     println!(
-        "+lvl {} -lvl {}, {}, len {}",
+        "+lvl {} -lvl {}, deepest {}, len {}",
         tree.root_level, tree.deepest, tree.mw, tree.len
     );
     //println!("Tree: {tree:?}");
@@ -462,9 +515,27 @@ fn main() -> Result<()> {
     let _ = core::hint::black_box(&arena);
     let pairs = tree.neighbor_radius_search(&raw_particles, &arena);
     let _ = core::hint::black_box(&pairs);
-    println!("Fast search took {:?}, {} pairs", now2.elapsed(), pairs.len());
+    println!(
+        "Fast search took {:?}, {} pairs",
+        now2.elapsed(),
+        pairs.len()
+    );
 
-    let pairs_naive = naive(&particles);
+    let mut pairs_naive = naive(&particles);
+
+    let mut pairs2 = Vec::new();
+    for &(p, q) in &pairs {
+        pairs2.push((p, q));
+        pairs2.push((q, p));
+    }
+    pairs_naive.sort();
+    pairs_naive.dedup();
+    pairs2.sort();
+    pairs2.dedup();
+
+    for (p, q) in pairs_naive.iter().zip(pairs2.iter()) {
+        assert_eq!(*p, *q);
+    }
     assert_eq!(pairs.len(), pairs_naive.len());
 
     Ok(())
