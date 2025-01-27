@@ -65,11 +65,11 @@ impl Tree {
                 for i in 0..8 {
                     Self::validate(arena[interm_idx as usize][i], middle + idx_to_vector(i as u8) * next_gran, next_gran * 0.5, &mut sub[i], particles, arena);
                 }
-                dbg!(&sub);
                 for i in 0..8 {
                     for p in &sub[i] {
                         let p = *p as usize;
                         println!("Validating({i}) {p:?} {:?} nlvl {next_gran}", particles[p]);
+                        println!("Mid {middle:?}");
                         if i & 1 == 1 {
                             assert!(particles[p].x >= middle.x);
                         } else {
@@ -139,7 +139,7 @@ impl Tree {
             Split { interm: u32, child: u8 },
         }
         let mut current_node = CurrentNode::Root;
-        let mut width = Coord::powi(2.0, self.root_level.into()) * 0.5;
+        let mut width = Coord::powi(2.0, self.root_level.into());
         let mut mid = self.mid;
 
         loop {
@@ -399,7 +399,7 @@ fn main() -> Result<()> {
             .unwrap_or(0)
             .next_power_of_two()
             .trailing_zeros()
-            + 1
+            //+ 1
     };
     println!("Tree max depth: {max_depth}");
 
@@ -422,16 +422,16 @@ fn main() -> Result<()> {
     arena.push([0; 8]);
 
     for i in 0..particles.len() {
-        println!("Inserting {}: {:?}", i + 1, particles[i]);
+        //println!("Inserting {}: {:?}", i + 1, particles[i]);
         tree.insert(
             NonZeroU32::new(1 + i as u32).unwrap(),
             &raw_particles,
             &mut arena,
         );
-        println!("Tree: {tree:?}");
-        println!("Arena: {:?}", &arena[1..]);
-        Tree::validate(tree.root, tree.mid, f32::powi(2.0, tree.root_level.into()), &mut Vec::new(), &raw_particles, &arena);
+        //println!("Tree: {tree:?}");
+        //println!("Arena: {:?}", &arena[1..]);
     }
+    //Tree::validate(tree.root, tree.mid, f32::powi(2.0, tree.root_level.into()) * 0.5, &mut Vec::new(), &raw_particles, &arena);
     println!("Built tree in {:?}", now0.elapsed());
     println!(
         "+lvl {} -lvl {}, {}, len {}",
@@ -445,9 +445,11 @@ fn main() -> Result<()> {
     println!("Running fast search");
     let now2 = Instant::now();
     let _ = core::hint::black_box(&arena);
+    /*
     let res = tree.neighbor_radius_search(&raw_particles, &arena);
     core::hint::black_box(res);
     println!("Fast search took {:?}", now2.elapsed());
+    */
 
     //let _ = naive(&particles);
 
