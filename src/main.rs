@@ -269,9 +269,7 @@ impl Tree {
                             width: Coord| {
             // Append (_, single) coset. Single particle must be outside the split if
             // the tree is valid.
-            if (particles[particle_idx as usize] - split_mid).norm_squared()
-                > 9.0 * (width * width).max(1.0)
-            {
+            if (particles[particle_idx as usize] - split_mid).norm() > 1.0 + 2.0 * width {
                 return;
             }
 
@@ -289,6 +287,7 @@ impl Tree {
             }
         };
 
+        let mut visited = 0;
         loop {
             for InProgress { p1, mid1, p2, mid2 } in in_progress.drain(..) {
                 match (Node::from_raw_index(p1), Node::from_raw_index(p2)) {
@@ -303,7 +302,34 @@ impl Tree {
                         // valid approximation is used.
 
                         let diff = mid2 - mid1;
-                        if diff.norm_squared() >= 16.0 * (width * width).max(1.0) {
+                        let scale = diff.abs();
+                        /*
+
+                        /*if (diff.component_mul(&scale) - diff * width * 2.0).norm_squared() >= 1.0 / scale.norm_squared() {
+                            continue;
+                        }*/
+                        if diff.norm_squared() >= 1.0 / (
+                        */
+
+                        // TODO: more efficient method
+                        let diag = Vectorf::new(
+                            if mid1.x == mid2.x {
+                                0.0
+                            } else {
+                                diff.x / scale.x
+                            },
+                            if mid1.y == mid2.y {
+                                0.0
+                            } else {
+                                diff.y / scale.y
+                            },
+                            if mid1.z == mid2.z {
+                                0.0
+                            } else {
+                                diff.z / scale.z
+                            },
+                        );
+                        if (diff - diag * width * 2.0).norm_squared() >= 1.0 {
                             continue;
                         }
 
@@ -344,6 +370,7 @@ impl Tree {
                         Some(Node::Final { particle_idx: f1 }),
                         Some(Node::Final { particle_idx: f2 }),
                     ) => {
+                        visited += 1;
                         if (particles[f1 as usize] - particles[f2 as usize]).norm_squared() <= 1.0 {
                             pairs.push((f1, f2));
                         }
@@ -357,6 +384,7 @@ impl Tree {
             }
             std::mem::swap(&mut in_progress, &mut next_in_progress);
         }
+        //println!("Visited {visited} pairs");
 
         pairs
     }
