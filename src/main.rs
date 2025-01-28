@@ -69,6 +69,7 @@ impl Tree {
         all: &mut Vec<u32>,
         particles: &[Vectorf],
         arena: &[[RawIndex; 8]],
+        mids: &[Vectorf],
     ) {
         match Node::from_raw_index(node) {
             None => (),
@@ -82,6 +83,7 @@ impl Tree {
                         &mut sub[i],
                         particles,
                         arena,
+                        mids,
                     );
                 }
                 for i in 0..8 {
@@ -121,6 +123,7 @@ impl Tree {
         index: NonZeroU32,
         all_positions: &[Vectorf],
         arena: &mut Vec<[RawIndex; 8]>,
+        mids: &mut Vec<Vectorf>,
     ) {
         let index = index.get();
         assert!(index < i32::MAX as u32);
@@ -190,6 +193,7 @@ impl Tree {
                         }
 
                         arena.push([NULL_IDX; 8]);
+                        mids.push(mid);
                         let old_idx = vector_to_idx(&(all_positions[particle_idx as usize] - mid));
                         arena[split_idx as usize][usize::from(old_idx)] =
                             Node::Final { particle_idx }.raw();
@@ -237,15 +241,14 @@ impl Tree {
         &self,
         particles: &[Vectorf],
         arena: &[[RawIndex; 8]],
+        mids: &[Vectorf],
     ) -> Vec<(u32, u32)> {
         // TODO: parallelize
 
         #[derive(Debug)]
         struct InProgress {
             p1: RawIndex,
-            mid1: Vectorf,
             p2: RawIndex,
-            mid2: Vectorf,
         }
 
         let mut in_progress = Vec::new();
@@ -255,9 +258,7 @@ impl Tree {
 
         in_progress.push(InProgress {
             p1: self.root,
-            mid1: self.mid,
             p2: self.root,
-            mid2: self.mid,
         });
 
         let mut pairs = Vec::new();
@@ -280,16 +281,14 @@ impl Tree {
                 }
                 next.push(InProgress {
                     p1,
-                    mid1: split_mid + idx_to_vector(i) * width * 0.5,
                     p2: particle_idx as i32,
-                    mid2: Vectorf::zeros(), // ignored from this point
                 });
             }
         };
 
         let mut visited = 0;
         loop {
-            for InProgress { p1, mid1, p2, mid2 } in in_progress.drain(..) {
+            for InProgress { p1, p2 } in in_progress.drain(..) {
                 match (Node::from_raw_index(p1), Node::from_raw_index(p2)) {
                     (None, _) | (_, None) => continue,
                     (
@@ -300,6 +299,9 @@ impl Tree {
                         // that cannot be within range at all. We don't necessarily need to
                         // calculate the exact minimum distance between the cubes, as long as a
                         // valid approximation is used.
+
+                        let mid1 = mids[i1 as usize];
+                        let mid2 = mids[i2 as usize];
 
                         let diff = mid2 - mid1;
                         let scale = diff.abs();
@@ -351,20 +353,27 @@ impl Tree {
                                 if p2 == 0 {
                                     continue;
                                 }
-                                next_in_progress.push(InProgress {
-                                    p1,
-                                    mid1: mid1 + idx_to_vector(i) * width * 0.5,
-                                    p2,
-                                    mid2: mid2 + idx_to_vector(j) * width * 0.5,
-                                });
+                                next_in_progress.push(InProgress { p1, p2 });
                             }
                         }
                     }
                     (Some(Node::Final { particle_idx }), Some(Node::Split { interm_idx })) => {
-                        filter_point(&mut next_in_progress, interm_idx, particle_idx, mid2, width);
+                        filter_point(
+                            &mut next_in_progress,
+                            interm_idx,
+                            particle_idx,
+                            mids[interm_idx as usize],
+                            width,
+                        );
                     }
                     (Some(Node::Split { interm_idx }), Some(Node::Final { particle_idx })) => {
-                        filter_point(&mut next_in_progress, interm_idx, particle_idx, mid1, width);
+                        filter_point(
+                            &mut next_in_progress,
+                            interm_idx,
+                            particle_idx,
+                            mids[interm_idx as usize],
+                            width,
+                        );
                     }
                     (
                         Some(Node::Final { particle_idx: f1 }),
@@ -492,14 +501,17 @@ fn main() -> Result<()> {
 
     // TODO: more efficient guess?
     let mut arena = Vec::<[RawIndex; 8]>::with_capacity(2 * particles.len());
+    let mut mids = Vec::<Vectorf>::with_capacity(2 * particles.len());
     // reserve null index
     arena.push([0; 8]);
+    mids.push(Vectorf::repeat(Coord::NAN));
 
     for i in 0..particles.len() {
         tree.insert(
             NonZeroU32::new(1 + i as u32).unwrap(),
             &raw_particles,
             &mut arena,
+            &mut mids,
         );
     }
     //Tree::validate(tree.root, tree.mid, Coord::powi(2.0, tree.root_level.into()) * 0.5, &mut Vec::new(), &raw_particles, &arena);
@@ -512,6 +524,7 @@ fn main() -> Result<()> {
         &mut all,
         &raw_particles,
         &arena,
+        &mids,
     );
     all.sort_unstable();
     for i in 0..particles.len() {
@@ -529,7 +542,7 @@ fn main() -> Result<()> {
     println!("Running fast search");
     let now2 = Instant::now();
     let _ = core::hint::black_box(&arena);
-    let pairs = tree.neighbor_radius_search(&raw_particles, &arena);
+    let pairs = tree.neighbor_radius_search(&raw_particles, &arena, &mids);
     let _ = core::hint::black_box(&pairs);
     println!(
         "Fast search took {:?}, {} pairs",
