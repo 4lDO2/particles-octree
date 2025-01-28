@@ -9,7 +9,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use nalgebra::Vector3;
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 enum Node {
     Split { interm_idx: u32 },
     Final { particle_idx: u32 },
@@ -245,153 +245,147 @@ impl Tree {
     ) -> Vec<(u32, u32)> {
         // TODO: parallelize
 
-        #[derive(Debug)]
-        struct InProgress {
-            p1: RawIndex,
-            p2: RawIndex,
+        struct Stage {
+            multi_multi: Vec<[u32; 2]>,
+            single_multi: Vec<[u32; 2]>,
+            pairs: Vec<[u32; 2]>,
         }
 
-        let mut in_progress = Vec::new();
-        let mut next_in_progress = Vec::new();
+        let mut stage = Stage {
+            multi_multi: Vec::with_capacity(2 * particles.len()),
+            single_multi: Vec::with_capacity(2 * particles.len()),
+            pairs: Vec::with_capacity(particles.len() * particles.len() / 1000),
+        };
+        let mut next_stage = Stage {
+            multi_multi: Vec::with_capacity(2 * particles.len()),
+            single_multi: Vec::with_capacity(2 * particles.len()),
+            pairs: Vec::with_capacity(particles.len() * particles.len() / 1000),
+        };
 
         let mut width = Coord::powi(2.0, self.root_level.into());
 
-        in_progress.push(InProgress {
-            p1: self.root,
-            p2: self.root,
-        });
+        match Node::from_raw_index(self.root) {
+            None => return Vec::new(),
+            Some(Node::Final { particle_idx }) => return vec![(particle_idx, particle_idx)],
+            Some(Node::Split { interm_idx }) => stage.multi_multi.push([interm_idx, interm_idx]),
+        }
 
         let mut pairs = Vec::new();
 
-        let filter_point = |next: &mut Vec<InProgress>,
-                            interm_idx,
-                            particle_idx,
-                            split_mid: Vectorf,
-                            width: Coord| {
-            // Append (_, single) coset. Single particle must be outside the split if
-            // the tree is valid.
-            if (particles[particle_idx as usize] - split_mid).norm() > 1.0 + 2.0 * width {
-                return;
-            }
-
-            for i in 0..8 {
-                let p1 = arena[interm_idx as usize][i as usize];
-                if p1 == 0 {
-                    continue;
+        let filter_point =
+            |next: &mut Stage, interm_idx, particle_idx, split_mid: Vectorf, width: Coord| {
+                // Append (_, single) coset. Single particle must be outside the split if
+                // the tree is valid.
+                if (particles[particle_idx as usize] - split_mid).norm() > 1.0 + 2.0 * width {
+                    return;
                 }
-                next.push(InProgress {
-                    p1,
-                    p2: particle_idx as i32,
-                });
-            }
-        };
+
+                for i in 0..8 {
+                    match Node::from_raw_index(arena[interm_idx as usize][i as usize]) {
+                        None => continue,
+                        Some(Node::Final { particle_idx: p2 }) => {
+                            next.pairs.push([particle_idx, p2])
+                        }
+                        Some(Node::Split { interm_idx: i2 }) => {
+                            next.single_multi.push([particle_idx, i2])
+                        }
+                    }
+                }
+            };
 
         let mut visited = 0;
         loop {
-            for InProgress { p1, p2 } in in_progress.drain(..) {
-                match (Node::from_raw_index(p1), Node::from_raw_index(p2)) {
-                    (None, _) | (_, None) => continue,
-                    (
-                        Some(Node::Split { interm_idx: i1 }),
-                        Some(Node::Split { interm_idx: i2 }),
-                    ) => {
-                        // Append Cartesian product of respective subnodes, filtering out the ones
-                        // that cannot be within range at all. We don't necessarily need to
-                        // calculate the exact minimum distance between the cubes, as long as a
-                        // valid approximation is used.
+            for [i1, i2] in stage.multi_multi.drain(..) {
+                // Append Cartesian product of respective subnodes, filtering out the ones
+                // that cannot be within range at all. We don't necessarily need to
+                // calculate the exact minimum distance between the cubes, as long as a
+                // valid approximation is used.
 
-                        let mid1 = mids[i1 as usize];
-                        let mid2 = mids[i2 as usize];
+                let mid1 = mids[i1 as usize];
+                let mid2 = mids[i2 as usize];
 
-                        let diff = mid2 - mid1;
-                        let scale = diff.abs();
-                        /*
+                let diff = mid2 - mid1;
+                let scale = diff.abs();
+                /*
 
-                        /*if (diff.component_mul(&scale) - diff * width * 2.0).norm_squared() >= 1.0 / scale.norm_squared() {
+                /*if (diff.component_mul(&scale) - diff * width * 2.0).norm_squared() >= 1.0 / scale.norm_squared() {
+                    continue;
+                }*/
+                if diff.norm_squared() >= 1.0 / (
+                */
+
+                // TODO: more efficient method
+                let diag = Vectorf::new(
+                    if mid1.x == mid2.x {
+                        0.0
+                    } else {
+                        diff.x / scale.x
+                    },
+                    if mid1.y == mid2.y {
+                        0.0
+                    } else {
+                        diff.y / scale.y
+                    },
+                    if mid1.z == mid2.z {
+                        0.0
+                    } else {
+                        diff.z / scale.z
+                    },
+                );
+                if (diff - diag * width * 2.0).norm_squared() >= 1.0 {
+                    continue;
+                }
+
+                for i in 0..8 {
+                    let j_range = if i1 == i2 {
+                        // node onto itself
+                        i..8
+                    } else {
+                        // independent nodes
+                        0..8
+                    };
+
+                    let Some(k1) = Node::from_raw_index(arena[i1 as usize][i as usize]) else {
+                        continue;
+                    };
+                    for j in j_range {
+                        let Some(k2) = Node::from_raw_index(arena[i2 as usize][j as usize]) else {
                             continue;
-                        }*/
-                        if diff.norm_squared() >= 1.0 / (
-                        */
-
-                        // TODO: more efficient method
-                        let diag = Vectorf::new(
-                            if mid1.x == mid2.x {
-                                0.0
-                            } else {
-                                diff.x / scale.x
-                            },
-                            if mid1.y == mid2.y {
-                                0.0
-                            } else {
-                                diff.y / scale.y
-                            },
-                            if mid1.z == mid2.z {
-                                0.0
-                            } else {
-                                diff.z / scale.z
-                            },
-                        );
-                        if (diff - diag * width * 2.0).norm_squared() >= 1.0 {
-                            continue;
-                        }
-
-                        for i in 0..8 {
-                            let j_range = if i1 == i2 {
-                                // node onto itself
-                                i..8
-                            } else {
-                                // independent nodes
-                                0..8
-                            };
-
-                            let p1 = arena[i1 as usize][i as usize];
-                            if p1 == 0 {
-                                continue;
+                        };
+                        match (k1, k2) {
+                            (
+                                Node::Final { particle_idx: f1 },
+                                Node::Final { particle_idx: f2 },
+                            ) => next_stage.pairs.push([f1, f2]),
+                            (Node::Split { interm_idx: i1 }, Node::Split { interm_idx: i2 }) => {
+                                next_stage.multi_multi.push([i1, i2])
                             }
-                            for j in j_range {
-                                let p2 = arena[i2 as usize][j as usize];
-                                if p2 == 0 {
-                                    continue;
-                                }
-                                next_in_progress.push(InProgress { p1, p2 });
+                            (Node::Final { particle_idx: p1 }, Node::Split { interm_idx: i2 })
+                            | (Node::Split { interm_idx: i2 }, Node::Final { particle_idx: p1 }) => {
+                                next_stage.single_multi.push([p1, i2])
                             }
-                        }
-                    }
-                    (Some(Node::Final { particle_idx }), Some(Node::Split { interm_idx })) => {
-                        filter_point(
-                            &mut next_in_progress,
-                            interm_idx,
-                            particle_idx,
-                            mids[interm_idx as usize],
-                            width,
-                        );
-                    }
-                    (Some(Node::Split { interm_idx }), Some(Node::Final { particle_idx })) => {
-                        filter_point(
-                            &mut next_in_progress,
-                            interm_idx,
-                            particle_idx,
-                            mids[interm_idx as usize],
-                            width,
-                        );
-                    }
-                    (
-                        Some(Node::Final { particle_idx: f1 }),
-                        Some(Node::Final { particle_idx: f2 }),
-                    ) => {
-                        visited += 1;
-                        if (particles[f1 as usize] - particles[f2 as usize]).norm_squared() <= 1.0 {
-                            pairs.push((f1, f2));
                         }
                     }
                 }
             }
+
+            for [p1, i2] in stage.single_multi.drain(..) {
+                filter_point(&mut next_stage, i2, p1, mids[i2 as usize], width);
+            }
+            for [f1, f2] in stage.pairs.drain(..) {
+                visited += 1;
+                if (particles[f1 as usize] - particles[f2 as usize]).norm_squared() <= 1.0 {
+                    pairs.push((f1, f2));
+                }
+            }
             width *= 0.5;
-            if next_in_progress.is_empty() {
-                assert!(in_progress.is_empty());
+            if next_stage.single_multi.is_empty()
+                && next_stage.multi_multi.is_empty()
+                && next_stage.pairs.is_empty()
+            {
                 break;
             }
-            std::mem::swap(&mut in_progress, &mut next_in_progress);
+            std::mem::swap(&mut stage, &mut next_stage);
         }
         //println!("Visited {visited} pairs");
 
