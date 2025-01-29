@@ -1,6 +1,9 @@
 #![feature(let_chains)]
 
-use std::arch::x86_64::{__m128, _mm_and_ps, _mm_broadcast_ss, _mm_broadcastss_ps, _mm_castsi128_ps, _mm_cmpeq_ps, _mm_cmpneq_ps, _mm_div_ps, _mm_load_ps, _mm_loadu_ps, _mm_mul_ps, _mm_set1_epi32, _mm_set1_epi8, _mm_sub_ps};
+use std::arch::x86_64::{
+    __m128, _mm_and_ps, _mm_broadcast_ss, _mm_castsi128_ps, _mm_cmpneq_ps, _mm_div_ps,
+    _mm_loadu_ps, _mm_mul_ps, _mm_set1_epi32, _mm_sub_ps,
+};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::num::NonZeroU32;
@@ -287,35 +290,72 @@ impl Tree {
 
                 // This part is very hot, so I used SIMD directly, improving perf by ~3%
 
-                unsafe {
-                    // XXX: Very unsafe, since Vector3 is 12-byte, but works :) 4th coordinate is
-                    // dont-care in this case
+                if CRAZY_SIMD {
+                    unsafe {
+                        // XXX: Very unsafe, since Vector3 is 12-byte, but works :) 4th coordinate is
+                        // dont-care in this case
 
-                    // Load mid-points of respective (equally sized) boxes. 
-                    let mid1 = _mm_loadu_ps(mids.as_ptr().add(i1 as usize).cast());
-                    let mid2 = _mm_loadu_ps(mids.as_ptr().add(i2 as usize).cast());
+                        // Load mid-points of respective (equally sized) boxes.
+                        let mid1 = _mm_loadu_ps(mids.as_ptr().add(i1 as usize).cast());
+                        let mid2 = _mm_loadu_ps(mids.as_ptr().add(i2 as usize).cast());
 
-                    let diff = _mm_sub_ps(mid2, mid1); // distance between
-                    let scale = _mm_and_ps(abs_mask, diff); // abs(diff)
+                        let diff = _mm_sub_ps(mid2, mid1); // distance between
+                        let scale = _mm_and_ps(abs_mask, diff); // abs(diff)
 
-                    // mask: effs if and only if mid2 != mid1, otherwise zeros
-                    // for floating point reasons, mid2 and mid1 must be compared directly rather
-                    // than comparing their difference diff
-                    let eqm = _mm_cmpneq_ps(mid2, mid1);
-                    // divide, filtering away division by zero (i.e. the two boxes have the same
-                    // coordinate wrt any axis).
-                    let diag = _mm_and_ps(eqm, _mm_div_ps(diff, scale));
+                        // mask: effs if and only if mid2 != mid1, otherwise zeros
+                        // for floating point reasons, mid2 and mid1 must be compared directly rather
+                        // than comparing their difference diff
+                        let eqm = _mm_cmpneq_ps(mid2, mid1);
+                        // divide, filtering away division by zero (i.e. the two boxes have the same
+                        // coordinate wrt any axis).
+                        let diag = _mm_and_ps(eqm, _mm_div_ps(diff, scale));
 
-                    // calculate diff + diag + 2 * width
-                    let fin = _mm_sub_ps(diff, _mm_mul_ps(diag, vec2w));
-                    // square before summing to get norm
-                    let finsq = _mm_mul_ps(fin, fin);
+                        // calculate diff + diag + 2 * width
+                        let fin = _mm_sub_ps(diff, _mm_mul_ps(diag, vec2w));
+                        // square before summing to get norm
+                        let finsq = _mm_mul_ps(fin, fin);
 
-                    let [x, y, z, _w]: [f32; 4] = std::mem::transmute(finsq);
-                    // check if outside
-                    // inclusive inequality is allowed for rejection, since the octree boxes are
-                    // half-open intervals, so the extreme case is treated as 'outside'
-                    if x + y + z >= 1.0 {
+                        let [x, y, z, _w]: [f32; 4] = std::mem::transmute(finsq);
+                        // check if outside
+                        // inclusive inequality is allowed for rejection, since the octree boxes are
+                        // half-open intervals, so the extreme case is treated as 'outside'
+                        if x + y + z >= 1.0 {
+                            continue;
+                        }
+                    }
+                } else {
+                    let mid1 = mids[i1 as usize];
+                    let mid2 = mids[i2 as usize];
+
+                    let diff = mid2 - mid1;
+                    let scale = diff.abs();
+                    /*
+
+                    /*if (diff.component_mul(&scale) - diff * width * 2.0).norm_squared() >= 1.0 / scale.norm_squared() {
+                        continue;
+                    }*/
+                    if diff.norm_squared() >= 1.0 / (
+                    */
+
+                    // TODO: more efficient method
+                    let diag = Vectorf::new(
+                        if mid1.x == mid2.x {
+                            0.0
+                        } else {
+                            diff.x / scale.x
+                        },
+                        if mid1.y == mid2.y {
+                            0.0
+                        } else {
+                            diff.y / scale.y
+                        },
+                        if mid1.z == mid2.z {
+                            0.0
+                        } else {
+                            diff.z / scale.z
+                        },
+                    );
+                    if (diff - diag * width * 2.0).norm_squared() >= 1.0 {
                         continue;
                     }
                 }
@@ -422,6 +462,9 @@ fn naive(particles: &[Vectorf]) -> Vec<(u32, u32)> {
     pairs
 }
 
+const VALIDATE: bool = false;
+const CRAZY_SIMD: bool = true;
+
 fn main() -> Result<()> {
     let file = BufReader::new(File::open(
         std::env::args()
@@ -512,8 +555,6 @@ fn main() -> Result<()> {
     }
     mids.push(Vectorf::repeat(Coord::NAN));
     println!("Built tree in {:?}", now0.elapsed());
-
-    const VALIDATE: bool = false;
 
     if VALIDATE {
         let mut all = Vec::new();
