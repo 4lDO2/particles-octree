@@ -437,6 +437,7 @@ fn main() -> Result<()> {
             .unwrap_or_else(|| "data/positions.xyz".into()),
     )?);
 
+    let now00 = Instant::now();
     let raw_particles = {
         // reserve index 0 for null sentinel
         std::iter::once(Ok(Vectorf::repeat(Coord::NAN)))
@@ -451,8 +452,10 @@ fn main() -> Result<()> {
             }))
             .collect::<Result<Vec<_>>>()?
     };
+    println!("Parsed in {:?}", now00.elapsed());
     let particles = &raw_particles[1..];
 
+    let now0 = Instant::now();
     let max_depth = {
         // Calculate size of the smallest cube that fits all points (without translating or
         // rotating the data).
@@ -484,7 +487,8 @@ fn main() -> Result<()> {
             .next_power_of_two()
             .trailing_zeros()
     };
-    println!("Tree max depth: {max_depth}");
+    let elapsed = now0.elapsed();
+    println!("Tree max depth: {max_depth}, calculated in {elapsed:?}");
 
     let mut tree = Tree {
         root: NULL_IDX,
@@ -514,27 +518,31 @@ fn main() -> Result<()> {
             &mut mids,
         );
     }
-    //Tree::validate(tree.root, tree.mid, Coord::powi(2.0, tree.root_level.into()) * 0.5, &mut Vec::new(), &raw_particles, &arena);
     println!("Built tree in {:?}", now0.elapsed());
-    let mut all = Vec::new();
-    Tree::validate(
-        tree.root,
-        tree.mid,
-        Coord::powi(2.0, tree.root_level.into()) * 0.5,
-        &mut all,
-        &raw_particles,
-        &arena,
-        &mids,
-    );
-    all.sort_unstable();
-    for i in 0..particles.len() {
-        assert_eq!(all[i] as usize, i + 1);
+
+    const VALIDATE: bool = false;
+
+    if VALIDATE {
+        let mut all = Vec::new();
+        Tree::validate(
+            tree.root,
+            tree.mid,
+            Coord::powi(2.0, tree.root_level.into()) * 0.5,
+            &mut all,
+            &raw_particles,
+            &arena,
+            &mids,
+        );
+        all.sort_unstable();
+        for i in 0..particles.len() {
+            assert_eq!(all[i] as usize, i + 1);
+        }
+        assert_eq!(all.len(), tree.len as usize);
+        println!(
+            "+lvl {} -lvl {}, deepest {}, len {}",
+            tree.root_level, tree.deepest, tree.mw, tree.len
+        );
     }
-    assert_eq!(all.len(), tree.len as usize);
-    println!(
-        "+lvl {} -lvl {}, deepest {}, len {}",
-        tree.root_level, tree.deepest, tree.mw, tree.len
-    );
     let _ = core::hint::black_box(&tree);
 
     println!("Input: {} coordinates", particles.len());
@@ -550,22 +558,24 @@ fn main() -> Result<()> {
         pairs.len()
     );
 
-    let mut pairs_naive = naive(&particles);
+    if VALIDATE {
+        let mut pairs_naive = naive(&particles);
 
-    let mut pairs2 = Vec::new();
-    for &(p, q) in &pairs {
-        pairs2.push((p, q));
-        pairs2.push((q, p));
-    }
-    pairs_naive.sort();
-    pairs_naive.dedup();
-    pairs2.sort();
-    pairs2.dedup();
+        let mut pairs2 = Vec::new();
+        for &(p, q) in &pairs {
+            pairs2.push((p, q));
+            pairs2.push((q, p));
+        }
+        pairs_naive.sort();
+        pairs_naive.dedup();
+        pairs2.sort();
+        pairs2.dedup();
 
-    for (p, q) in pairs_naive.iter().zip(pairs2.iter()) {
-        assert_eq!(*p, *q);
+        for (p, q) in pairs_naive.iter().zip(pairs2.iter()) {
+            assert_eq!(*p, *q);
+        }
+        assert_eq!(pairs2.len(), pairs_naive.len());
     }
-    assert_eq!(pairs2.len(), pairs_naive.len());
 
     Ok(())
 }
