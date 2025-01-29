@@ -272,27 +272,6 @@ impl Tree {
 
         let mut pairs = Vec::new();
 
-        let filter_point =
-            |next: &mut Stage, interm_idx, particle_idx, split_mid: Vectorf, width: Coord| {
-                // Append (_, single) coset. Single particle must be outside the split if
-                // the tree is valid.
-                if (particles[particle_idx as usize] - split_mid).norm() > 1.0 + 2.0 * width {
-                    return;
-                }
-
-                for i in 0..8 {
-                    match Node::from_raw_index(arena[interm_idx as usize][i as usize]) {
-                        None => continue,
-                        Some(Node::Final { particle_idx: p2 }) => {
-                            next.pairs.push([particle_idx, p2])
-                        }
-                        Some(Node::Split { interm_idx: i2 }) => {
-                            next.single_multi.push([particle_idx, i2])
-                        }
-                    }
-                }
-            };
-
         let mut visited = 0;
         loop {
             for [i1, i2] in stage.multi_multi.drain(..) {
@@ -370,7 +349,21 @@ impl Tree {
             }
 
             for [p1, i2] in stage.single_multi.drain(..) {
-                filter_point(&mut next_stage, i2, p1, mids[i2 as usize], width);
+                // Append (_, single) coset. Single particle must be outside the split if
+                // the tree is valid.
+                if (particles[p1 as usize] - mids[i2 as usize]).norm() > 1.0 + 2.0 * width {
+                    continue;
+                }
+
+                for i in 0..8 {
+                    match Node::from_raw_index(arena[i2 as usize][i as usize]) {
+                        None => continue,
+                        Some(Node::Final { particle_idx: p2 }) => next_stage.pairs.push([p1, p2]),
+                        Some(Node::Split { interm_idx: i2 }) => {
+                            next_stage.single_multi.push([p1, i2])
+                        }
+                    }
+                }
             }
             for [f1, f2] in stage.pairs.drain(..) {
                 visited += 1;
