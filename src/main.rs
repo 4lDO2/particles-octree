@@ -7,6 +7,8 @@ use std::arch::x86_64::{
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::num::NonZeroU32;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -144,19 +146,6 @@ impl Tree {
         let mut level = self.root_level;
 
         if root_shift.abs().max() > Coord::powi(2.0, self.root_level.into()) {
-            /*println!("upwards");
-            // Entire tree is too small to contain both 'index' and 'self.root', must increase root
-            // level.
-
-            let child_idx = arena.len() as u32;
-            arena.push([0; 8]);
-            arena[child_idx as usize][usize::from(vector_to_idx(&root_shift))] = self.root;
-            self.root = Node::Split {
-                interm_idx: child_idx,
-            }
-            .raw();
-            self.root_level += 1;
-            return;*/
             unreachable!();
         }
 
@@ -248,41 +237,50 @@ impl Tree {
     ) -> Vec<(u32, u32)> {
         // TODO: parallelize
 
-        struct Stage {
-            multi_multi: Vec<[u32; 2]>,
-            single_multi: Vec<[u32; 2]>,
-            pairs: Vec<[u32; 2]>,
+        #[derive(Debug)]
+        enum Type {
+            MultiMulti,
+            SingleMulti,
+        }
+        struct Work {
+            work: Vec<[u32; 2]>,
+            ty: Type,
+            width: Coord,
         }
 
-        let mut stage = Stage {
-            multi_multi: Vec::with_capacity(8 * particles.len()),
-            single_multi: Vec::with_capacity(8 * particles.len()),
-            pairs: Vec::with_capacity(particles.len() * particles.len() / 1000),
-        };
-        let mut next_stage = Stage {
-            multi_multi: Vec::with_capacity(8 * particles.len()),
-            single_multi: Vec::with_capacity(8 * particles.len()),
-            pairs: Vec::with_capacity(particles.len() * particles.len() / 1000),
-        };
+        struct State {
+            work: Mutex<Vec<Work>>,
+            finished: Mutex<Vec<Vec<(u32, u32)>>>,
+            semaphore: AtomicUsize,
+        }
 
-        let mut width = Coord::powi(2.0, self.root_level.into());
-
-        match Node::from_raw_index(self.root) {
+        let initial_work = match Node::from_raw_index(self.root) {
             None => return Vec::new(),
             Some(Node::Final { particle_idx }) => return vec![(particle_idx, particle_idx)],
-            Some(Node::Split { interm_idx }) => stage.multi_multi.push([interm_idx, interm_idx]),
-        }
-
-        let mut pairs = Vec::new();
-
-        let mut visited = 0;
+            Some(Node::Split { interm_idx }) => Work {
+                work: vec![[interm_idx, interm_idx]],
+                width: Coord::powi(2.0, self.root_level.into()),
+                ty: Type::MultiMulti,
+            },
+        };
+        let state = State {
+            work: Mutex::new(vec![initial_work]),
+            finished: Mutex::new(Vec::new()),
+            semaphore: AtomicUsize::new(32),
+        };
 
         let abs_mask: __m128 = unsafe { _mm_castsi128_ps(_mm_set1_epi32(!((1 << 31) as i32))) };
 
-        loop {
+        const WORK_SIZE: usize = 1024;
+
+        let do_mm_drain = |mm: Vec<[u32; 2]>, width: Coord, state: &State| {
             let vec2w = unsafe { _mm_broadcast_ss(&(2.0 * width)) };
 
-            for [i1, i2] in stage.multi_multi.drain(..) {
+            let mut next_sm = Vec::with_capacity(WORK_SIZE);
+            let mut next_mm = Vec::with_capacity(WORK_SIZE);
+            let mut next_fin = Vec::with_capacity(WORK_SIZE);
+
+            for [i1, i2] in mm {
                 // Append Cartesian product of respective subnodes, filtering out the ones
                 // that cannot be within range at all. We don't necessarily need to
                 // calculate the exact minimum distance between the cubes, as long as a
@@ -373,54 +371,158 @@ impl Tree {
                             (
                                 Node::Final { particle_idx: f1 },
                                 Node::Final { particle_idx: f2 },
-                            ) => next_stage.pairs.push([f1, f2]),
+                            ) => {
+                                if (particles[f1 as usize] - particles[f2 as usize]).norm_squared()
+                                    <= 1.0
+                                {
+                                    next_fin.push((f1, f2));
+                                }
+                            }
                             (Node::Split { interm_idx: i1 }, Node::Split { interm_idx: i2 }) => {
-                                next_stage.multi_multi.push([i1, i2])
+                                next_mm.push([i1, i2])
                             }
                             (Node::Final { particle_idx: p1 }, Node::Split { interm_idx: i2 })
                             | (Node::Split { interm_idx: i2 }, Node::Final { particle_idx: p1 }) => {
-                                next_stage.single_multi.push([p1, i2])
+                                next_sm.push([p1, i2])
                             }
                         }
                     }
                 }
+                if next_fin.len() >= next_fin.capacity() {
+                    let chunk = std::mem::replace(&mut next_fin, Vec::with_capacity(WORK_SIZE));
+                    state.finished.lock().unwrap().push(chunk);
+                }
+                if next_sm.len() >= next_sm.capacity() {
+                    let chunk = std::mem::replace(&mut next_sm, Vec::with_capacity(WORK_SIZE));
+                    state.work.lock().unwrap().push(Work {
+                        work: chunk,
+                        ty: Type::SingleMulti,
+                        width: width * 0.5,
+                    });
+                }
+                if next_mm.len() >= next_mm.capacity() {
+                    let chunk = std::mem::replace(&mut next_mm, Vec::with_capacity(WORK_SIZE));
+                    state.work.lock().unwrap().push(Work {
+                        work: chunk,
+                        ty: Type::MultiMulti,
+                        width: width * 0.5,
+                    });
+                }
             }
+            if !next_fin.is_empty() {
+                state.finished.lock().unwrap().push(next_fin);
+            }
+            if !next_sm.is_empty() {
+                state.work.lock().unwrap().push(Work {
+                    work: next_sm,
+                    ty: Type::SingleMulti,
+                    width: width * 0.5,
+                });
+            }
+            if !next_mm.is_empty() {
+                state.work.lock().unwrap().push(Work {
+                    work: next_mm,
+                    ty: Type::SingleMulti,
+                    width: width * 0.5,
+                });
+            }
+        };
+        let do_sm_drain = |sm: Vec<[u32; 2]>, width: Coord, state: &State| {
+            let mut next_fin = Vec::with_capacity(WORK_SIZE);
+            let mut next_sm = Vec::with_capacity(WORK_SIZE);
 
-            for [p1, i2] in stage.single_multi.drain(..) {
+            for [p1, i2] in sm {
                 // Append (_, single) coset. Single particle must be outside the split if
                 // the tree is valid.
-                if (particles[p1 as usize] - mids[i2 as usize]).norm() > 1.0 + 2.0 * width {
+                let pos1 = particles[p1 as usize];
+                if (pos1 - mids[i2 as usize]).norm() > 1.0 + 2.0 * width {
                     continue;
                 }
 
                 for i in 0..8 {
                     match Node::from_raw_index(arena[i2 as usize][i as usize]) {
                         None => continue,
-                        Some(Node::Final { particle_idx: p2 }) => next_stage.pairs.push([p1, p2]),
-                        Some(Node::Split { interm_idx: i2 }) => {
-                            next_stage.single_multi.push([p1, i2])
+                        Some(Node::Final { particle_idx: p2 }) => {
+                            if (pos1 - particles[p2 as usize]).norm_squared() <= 1.0 {
+                                next_fin.push((p1, p2));
+                            }
                         }
+                        Some(Node::Split { interm_idx: i2 }) => next_sm.push([p1, i2]),
                     }
                 }
-            }
-            for [f1, f2] in stage.pairs.drain(..) {
-                visited += 1;
-                if (particles[f1 as usize] - particles[f2 as usize]).norm_squared() <= 1.0 {
-                    pairs.push((f1, f2));
+                if next_fin.len() >= next_fin.capacity() {
+                    let chunk = std::mem::replace(&mut next_fin, Vec::with_capacity(WORK_SIZE));
+                    state.finished.lock().unwrap().push(chunk);
+                }
+                if next_sm.len() >= next_sm.capacity() {
+                    let chunk = std::mem::replace(&mut next_sm, Vec::with_capacity(WORK_SIZE));
+                    state.work.lock().unwrap().push(Work {
+                        work: chunk,
+                        ty: Type::SingleMulti,
+                        width: width * 0.5,
+                    });
                 }
             }
-            width *= 0.5;
-            if next_stage.single_multi.is_empty()
-                && next_stage.multi_multi.is_empty()
-                && next_stage.pairs.is_empty()
-            {
-                break;
+            if !next_fin.is_empty() {
+                state.finished.lock().unwrap().push(next_fin);
             }
-            std::mem::swap(&mut stage, &mut next_stage);
-        }
-        //println!("Visited {visited} pairs");
+            if !next_sm.is_empty() {
+                state.work.lock().unwrap().push(Work {
+                    work: next_sm,
+                    ty: Type::SingleMulti,
+                    width: width * 0.5,
+                });
+            }
+        };
+        let do_work = |Work { work, ty, width }: Work, state: &State| match ty {
+            Type::MultiMulti => do_mm_drain(work, width, state),
+            Type::SingleMulti => do_sm_drain(work, width, state),
+        };
 
-        pairs
+        std::thread::scope(|scope| {
+            let state = &state;
+            let workers = (0..32)
+                .map(|i| {
+                    scope.spawn(move || {
+                        'outer: loop {
+                            let tried = state.work.lock().unwrap().pop();
+                            let Some(work) = tried else {
+                                state.semaphore.fetch_sub(1, Ordering::SeqCst);
+                                while state.work.lock().unwrap().is_empty() {
+                                    if state.semaphore.load(Ordering::SeqCst) == 0 {
+                                        break 'outer;
+                                    }
+                                    std::thread::yield_now();
+                                }
+                                state.semaphore.fetch_add(1, Ordering::SeqCst);
+                                continue 'outer;
+                            };
+                            println!(
+                                "Thread {i} work {} {:?} #{}",
+                                work.width,
+                                work.ty,
+                                work.work.len()
+                            );
+                            do_work(work, &state);
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            while state.semaphore.load(Ordering::SeqCst) > 0 {
+                std::thread::yield_now();
+            }
+            assert!(state.work.lock().unwrap().is_empty());
+            let mut pairs = Vec::with_capacity(particles.len() * particles.len() / 1000);
+            while let Some(mut finished) = state.finished.lock().unwrap().pop() {
+                pairs.append(&mut finished);
+            }
+
+            for worker in workers {
+                drop(worker);
+            }
+
+            pairs
+        })
     }
 }
 type Vectorf = Vector3<Coord>;
