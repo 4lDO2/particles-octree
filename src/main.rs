@@ -273,6 +273,13 @@ impl Tree {
             let mut next_fin = Vec::with_capacity(WORK_SIZE);
 
             for [r1, r2] in work {
+                if next_work.len() >= WORK_SIZE - 64 {
+                    let chunk = std::mem::replace(&mut next_work, Vec::with_capacity(WORK_SIZE));
+                    worker.push(Work {
+                        work: chunk,
+                        width: width * 0.5,
+                    });
+                }
                 match (
                     Node::from_raw_index(r1).unwrap(),
                     Node::from_raw_index(r2).unwrap(),
@@ -395,13 +402,6 @@ impl Tree {
                         }
                     }
                 }
-                if next_work.len() >= WORK_SIZE {
-                    let chunk = std::mem::replace(&mut next_work, Vec::with_capacity(WORK_SIZE));
-                    worker.push(Work {
-                        work: chunk,
-                        width: width * 0.5,
-                    });
-                }
             }
             if !next_fin.is_empty() {
                 state.finished.lock().unwrap().push(next_fin);
@@ -497,7 +497,7 @@ fn naive(particles: &[Vectorf]) -> Vec<[u32; 2]> {
 const VALIDATE: bool = false;
 const CRAZY_SIMD: bool = true;
 const NUM_THREADS: usize = 32;
-const WORK_SIZE: usize = 16384;
+const WORK_SIZE: usize = 8192;
 
 fn main() -> Result<()> {
     let file = BufReader::new(File::open(
