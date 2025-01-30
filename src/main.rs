@@ -234,7 +234,7 @@ impl Tree {
         particles: &[Vectorf],
         arena: &[[RawIndex; 8]],
         mids: &[Vectorf],
-    ) -> Vec<(u32, u32)> {
+    ) -> Vec<[u32; 2]> {
         // TODO: parallelize
 
         #[derive(Debug)]
@@ -250,13 +250,13 @@ impl Tree {
 
         struct State {
             work: Mutex<Vec<Work>>,
-            finished: Mutex<Vec<Vec<(u32, u32)>>>,
+            finished: Mutex<Vec<Vec<[u32; 2]>>>,
             semaphore: AtomicUsize,
         }
 
         let initial_work = match Node::from_raw_index(self.root) {
             None => return Vec::new(),
-            Some(Node::Final { particle_idx }) => return vec![(particle_idx, particle_idx)],
+            Some(Node::Final { particle_idx }) => return vec![[particle_idx, particle_idx]],
             Some(Node::Split { interm_idx }) => Work {
                 work: vec![[interm_idx, interm_idx]],
                 width: Coord::powi(2.0, self.root_level.into()),
@@ -373,7 +373,7 @@ impl Tree {
                                 if (particles[f1 as usize] - particles[f2 as usize]).norm_squared()
                                     <= 1.0
                                 {
-                                    next_fin.push((f1, f2));
+                                    next_fin.push([f1, f2]);
                                 }
                             }
                             (Node::Split { interm_idx: i1 }, Node::Split { interm_idx: i2 }) => {
@@ -442,7 +442,7 @@ impl Tree {
                         None => continue,
                         Some(Node::Final { particle_idx: p2 }) => {
                             if (pos1 - particles[p2 as usize]).norm_squared() <= 1.0 {
-                                next_fin.push((p1, p2));
+                                next_fin.push([p1, p2]);
                             }
                         }
                         Some(Node::Split { interm_idx: i2 }) => next_sm.push([p1, i2]),
@@ -517,7 +517,6 @@ impl Tree {
             }
 
             assert!(state.work.lock().unwrap().is_empty());
-
         });
         let mut pairs = Vec::with_capacity(particles.len() * particles.len() / 1000);
         while let Some(mut finished) = state.finished.get_mut().unwrap().pop() {
@@ -528,7 +527,7 @@ impl Tree {
 }
 type Vectorf = Vector3<Coord>;
 
-fn naive(particles: &[Vectorf]) -> Vec<(u32, u32)> {
+fn naive(particles: &[Vectorf]) -> Vec<[u32; 2]> {
     let mut pairs = Vec::with_capacity(1024 * 1024 * 1024);
 
     let now = Instant::now();
@@ -537,7 +536,7 @@ fn naive(particles: &[Vectorf]) -> Vec<(u32, u32)> {
         //for j in i + 1..particles.len() {
         for j in 0..particles.len() {
             if (particles[i] - particles[j]).norm_squared() <= /*RADIUS * RADIUS*/ 1.0 {
-                pairs.push((i as u32 + 1, j as u32 + 1));
+                pairs.push([i as u32 + 1, j as u32 + 1]);
             }
         }
     }
@@ -694,9 +693,9 @@ fn main() -> Result<()> {
         let mut pairs_naive = naive(&particles);
 
         let mut pairs2 = Vec::new();
-        for &(p, q) in &pairs {
-            pairs2.push((p, q));
-            pairs2.push((q, p));
+        for &[p, q] in &pairs {
+            pairs2.push([p, q]);
+            pairs2.push([q, p]);
         }
         pairs_naive.sort();
         pairs_naive.dedup();
