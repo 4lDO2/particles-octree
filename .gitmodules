@@ -1,0 +1,3 @@
+[submodule "student-challenge-particle-simulation"]
+	path = student-challenge-particle-simulation
+	url = https://github.com/industrialpathsolutions/student-challenge-particle-simulation
