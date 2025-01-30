@@ -255,13 +255,13 @@ impl Tree {
         }
 
         let mut stage = Stage {
-            multi_multi: Vec::with_capacity(2 * particles.len()),
-            single_multi: Vec::with_capacity(2 * particles.len()),
+            multi_multi: Vec::with_capacity(8 * particles.len()),
+            single_multi: Vec::with_capacity(8 * particles.len()),
             pairs: Vec::with_capacity(particles.len() * particles.len() / 1000),
         };
         let mut next_stage = Stage {
-            multi_multi: Vec::with_capacity(2 * particles.len()),
-            single_multi: Vec::with_capacity(2 * particles.len()),
+            multi_multi: Vec::with_capacity(8 * particles.len()),
+            single_multi: Vec::with_capacity(8 * particles.len()),
             pairs: Vec::with_capacity(particles.len() * particles.len() / 1000),
         };
 
@@ -329,13 +329,6 @@ impl Tree {
 
                     let diff = mid2 - mid1;
                     let scale = diff.abs();
-                    /*
-
-                    /*if (diff.component_mul(&scale) - diff * width * 2.0).norm_squared() >= 1.0 / scale.norm_squared() {
-                        continue;
-                    }*/
-                    if diff.norm_squared() >= 1.0 / (
-                    */
 
                     // TODO: more efficient method
                     let diag = Vectorf::new(
