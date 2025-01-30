@@ -237,14 +237,8 @@ impl Tree {
     ) -> Vec<[u32; 2]> {
         // TODO: parallelize
 
-        #[derive(Debug)]
-        enum Type {
-            MultiMulti,
-            SingleMulti,
-        }
         struct Work {
-            work: Vec<[u32; 2]>,
-            ty: Type,
+            work: Vec<[RawIndex; 2]>,
             width: Coord,
         }
 
@@ -258,9 +252,8 @@ impl Tree {
             None => return Vec::new(),
             Some(Node::Final { particle_idx }) => return vec![[particle_idx, particle_idx]],
             Some(Node::Split { interm_idx }) => Work {
-                work: vec![[interm_idx, interm_idx]],
+                work: vec![[Node::Split { interm_idx }.raw(); 2]],
                 width: Coord::powi(2.0, self.root_level.into()),
-                ty: Type::MultiMulti,
             },
         };
         let mut state = State {
@@ -271,138 +264,139 @@ impl Tree {
 
         let abs_mask: __m128 = unsafe { _mm_castsi128_ps(_mm_set1_epi32(!((1 << 31) as i32))) };
 
-        let do_mm_drain = |mm: Vec<[u32; 2]>, width: Coord, state: &State| {
+        let do_work = |work: Vec<[RawIndex; 2]>, width: Coord, state: &State| {
             let vec2w = unsafe { _mm_broadcast_ss(&(2.0 * width)) };
 
-            let mut next_sm = Vec::with_capacity(WORK_SIZE);
-            let mut next_mm = Vec::with_capacity(WORK_SIZE);
+            let mut next_work = Vec::with_capacity(WORK_SIZE);
             let mut next_fin = Vec::with_capacity(WORK_SIZE);
 
-            for [i1, i2] in mm {
-                // Append Cartesian product of respective subnodes, filtering out the ones
-                // that cannot be within range at all. We don't necessarily need to
-                // calculate the exact minimum distance between the cubes, as long as a
-                // valid approximation is used.
+            for [r1, r2] in work {
+                match (
+                    Node::from_raw_index(r1).unwrap(),
+                    Node::from_raw_index(r2).unwrap(),
+                ) {
+                    (Node::Split { interm_idx: i1 }, Node::Split { interm_idx: i2 }) => {
+                        // Append Cartesian product of respective subnodes, filtering out the ones
+                        // that cannot be within range at all. We don't necessarily need to
+                        // calculate the exact minimum distance between the cubes, as long as a
+                        // valid approximation is used.
 
-                // This part is very hot, so I used SIMD directly, improving perf by ~3%
+                        // This part is very hot, so I used SIMD directly, improving perf by ~3%
 
-                if CRAZY_SIMD {
-                    unsafe {
-                        // XXX: Very unsafe, since Vector3 is 12-byte, but works :) 4th coordinate is
-                        // dont-care in this case
+                        if CRAZY_SIMD {
+                            unsafe {
+                                // XXX: Very unsafe, since Vector3 is 12-byte, but works :) 4th coordinate is
+                                // dont-care in this case
 
-                        // Load mid-points of respective (equally sized) boxes.
-                        let mid1 = _mm_loadu_ps(mids.as_ptr().add(i1 as usize).cast());
-                        let mid2 = _mm_loadu_ps(mids.as_ptr().add(i2 as usize).cast());
+                                // Load mid-points of respective (equally sized) boxes.
+                                let mid1 = _mm_loadu_ps(mids.as_ptr().add(i1 as usize).cast());
+                                let mid2 = _mm_loadu_ps(mids.as_ptr().add(i2 as usize).cast());
 
-                        let diff = _mm_sub_ps(mid2, mid1); // distance between
-                        let scale = _mm_and_ps(abs_mask, diff); // abs(diff)
+                                let diff = _mm_sub_ps(mid2, mid1); // distance between
+                                let scale = _mm_and_ps(abs_mask, diff); // abs(diff)
 
-                        // mask: effs if and only if mid2 != mid1, otherwise zeros
-                        // for floating point reasons, mid2 and mid1 must be compared directly rather
-                        // than comparing their difference diff
-                        let eqm = _mm_cmpneq_ps(mid2, mid1);
-                        // divide, filtering away division by zero (i.e. the two boxes have the same
-                        // coordinate wrt any axis).
-                        let diag = _mm_and_ps(eqm, _mm_div_ps(diff, scale));
+                                // mask: effs if and only if mid2 != mid1, otherwise zeros
+                                // for floating point reasons, mid2 and mid1 must be compared directly rather
+                                // than comparing their difference diff
+                                let eqm = _mm_cmpneq_ps(mid2, mid1);
+                                // divide, filtering away division by zero (i.e. the two boxes have the same
+                                // coordinate wrt any axis).
+                                let diag = _mm_and_ps(eqm, _mm_div_ps(diff, scale));
 
-                        // calculate diff + diag + 2 * width
-                        let fin = _mm_sub_ps(diff, _mm_mul_ps(diag, vec2w));
-                        // square before summing to get norm
-                        let finsq = _mm_mul_ps(fin, fin);
+                                // calculate diff + diag + 2 * width
+                                let fin = _mm_sub_ps(diff, _mm_mul_ps(diag, vec2w));
+                                // square before summing to get norm
+                                let finsq = _mm_mul_ps(fin, fin);
 
-                        let [x, y, z, _w]: [f32; 4] = std::mem::transmute(finsq);
-                        // check if outside
-                        // inclusive inequality is allowed for rejection, since the octree boxes are
-                        // half-open intervals, so the extreme case is treated as 'outside'
-                        if x + y + z >= 1.0 {
-                            continue;
-                        }
-                    }
-                } else {
-                    let mid1 = mids[i1 as usize];
-                    let mid2 = mids[i2 as usize];
-
-                    let diff = mid2 - mid1;
-                    let scale = diff.abs();
-
-                    // TODO: more efficient method
-                    let diag = Vectorf::new(
-                        if mid1.x == mid2.x {
-                            0.0
-                        } else {
-                            diff.x / scale.x
-                        },
-                        if mid1.y == mid2.y {
-                            0.0
-                        } else {
-                            diff.y / scale.y
-                        },
-                        if mid1.z == mid2.z {
-                            0.0
-                        } else {
-                            diff.z / scale.z
-                        },
-                    );
-                    if (diff - diag * width * 2.0).norm_squared() >= 1.0 {
-                        continue;
-                    }
-                }
-
-                for i in 0..8 {
-                    let j_range = if i1 == i2 {
-                        // node onto itself
-                        i..8
-                    } else {
-                        // independent nodes
-                        0..8
-                    };
-
-                    let Some(k1) = Node::from_raw_index(arena[i1 as usize][i as usize]) else {
-                        continue;
-                    };
-                    for j in j_range {
-                        let Some(k2) = Node::from_raw_index(arena[i2 as usize][j as usize]) else {
-                            continue;
-                        };
-                        match (k1, k2) {
-                            (
-                                Node::Final { particle_idx: f1 },
-                                Node::Final { particle_idx: f2 },
-                            ) => {
-                                if (particles[f1 as usize] - particles[f2 as usize]).norm_squared()
-                                    <= 1.0
-                                {
-                                    next_fin.push([f1, f2]);
+                                let [x, y, z, _w]: [f32; 4] = std::mem::transmute(finsq);
+                                // check if outside
+                                // inclusive inequality is allowed for rejection, since the octree boxes are
+                                // half-open intervals, so the extreme case is treated as 'outside'
+                                if x + y + z >= 1.0 {
+                                    continue;
                                 }
                             }
-                            (Node::Split { interm_idx: i1 }, Node::Split { interm_idx: i2 }) => {
-                                next_mm.push([i1, i2])
+                        } else {
+                            let mid1 = mids[i1 as usize];
+                            let mid2 = mids[i2 as usize];
+
+                            let diff = mid2 - mid1;
+                            let scale = diff.abs();
+
+                            // TODO: more efficient method
+                            let diag = Vectorf::new(
+                                if mid1.x == mid2.x {
+                                    0.0
+                                } else {
+                                    diff.x / scale.x
+                                },
+                                if mid1.y == mid2.y {
+                                    0.0
+                                } else {
+                                    diff.y / scale.y
+                                },
+                                if mid1.z == mid2.z {
+                                    0.0
+                                } else {
+                                    diff.z / scale.z
+                                },
+                            );
+                            if (diff - diag * width * 2.0).norm_squared() >= 1.0 {
+                                continue;
                             }
-                            (Node::Final { particle_idx: p1 }, Node::Split { interm_idx: i2 })
-                            | (Node::Split { interm_idx: i2 }, Node::Final { particle_idx: p1 }) => {
-                                next_sm.push([p1, i2])
+                        }
+
+                        for i in 0..8 {
+                            let j_range = if i1 == i2 {
+                                // node onto itself
+                                i..8
+                            } else {
+                                // independent nodes
+                                0..8
+                            };
+
+                            let k1 = arena[i1 as usize][i as usize];
+
+                            if k1 == 0 {
+                                continue;
+                            }
+
+                            for j in j_range {
+                                let k2 = arena[i2 as usize][j as usize];
+                                if k2 == 0 {
+                                    continue;
+                                }
+                                next_work.push([k1, k2]);
                             }
                         }
                     }
+                    (Node::Split { interm_idx: i2 }, Node::Final { particle_idx: p1 })
+                    | (Node::Final { particle_idx: p1 }, Node::Split { interm_idx: i2 }) => {
+                        // Append (_, single) coset. Single particle must be outside the split if
+                        // the tree is valid.
+                        let pos1 = particles[p1 as usize];
+                        if (pos1 - mids[i2 as usize]).norm() > 1.0 + 2.0 * width {
+                            continue;
+                        }
+
+                        for i in 0..8 {
+                            let other = arena[i2 as usize][i];
+                            if other == 0 {
+                                continue;
+                            }
+                            next_work.push([Node::Final { particle_idx: p1 }.raw(), other]);
+                        }
+                    }
+                    (Node::Final { particle_idx: p1 }, Node::Final { particle_idx: p2 }) => {
+                        if (particles[p1 as usize] - particles[p2 as usize]).norm_squared() <= 1.0 {
+                            next_fin.push([p1, p2]);
+                        }
+                    }
                 }
-                if next_fin.len() >= WORK_SIZE {
-                    let chunk = std::mem::replace(&mut next_fin, Vec::with_capacity(WORK_SIZE));
-                    state.finished.lock().unwrap().push(chunk);
-                }
-                if next_sm.len() >= WORK_SIZE {
-                    let chunk = std::mem::replace(&mut next_sm, Vec::with_capacity(WORK_SIZE));
+                if next_work.len() >= WORK_SIZE {
+                    let chunk = std::mem::replace(&mut next_work, Vec::with_capacity(WORK_SIZE));
                     state.work.lock().unwrap().push(Work {
                         work: chunk,
-                        ty: Type::SingleMulti,
-                        width: width * 0.5,
-                    });
-                }
-                if next_mm.len() >= WORK_SIZE {
-                    let chunk = std::mem::replace(&mut next_mm, Vec::with_capacity(WORK_SIZE));
-                    state.work.lock().unwrap().push(Work {
-                        work: chunk,
-                        ty: Type::MultiMulti,
                         width: width * 0.5,
                     });
                 }
@@ -410,64 +404,9 @@ impl Tree {
             if !next_fin.is_empty() {
                 state.finished.lock().unwrap().push(next_fin);
             }
-            if !next_sm.is_empty() {
+            if !next_work.is_empty() {
                 state.work.lock().unwrap().push(Work {
-                    work: next_sm,
-                    ty: Type::SingleMulti,
-                    width: width * 0.5,
-                });
-            }
-            if !next_mm.is_empty() {
-                state.work.lock().unwrap().push(Work {
-                    work: next_mm,
-                    ty: Type::MultiMulti,
-                    width: width * 0.5,
-                });
-            }
-        };
-        let do_sm_drain = |sm: Vec<[u32; 2]>, width: Coord, state: &State| {
-            let mut next_fin = Vec::with_capacity(WORK_SIZE);
-            let mut next_sm = Vec::with_capacity(WORK_SIZE);
-
-            for [p1, i2] in sm {
-                // Append (_, single) coset. Single particle must be outside the split if
-                // the tree is valid.
-                let pos1 = particles[p1 as usize];
-                if (pos1 - mids[i2 as usize]).norm() > 1.0 + 2.0 * width {
-                    continue;
-                }
-
-                for i in 0..8 {
-                    match Node::from_raw_index(arena[i2 as usize][i as usize]) {
-                        None => continue,
-                        Some(Node::Final { particle_idx: p2 }) => {
-                            if (pos1 - particles[p2 as usize]).norm_squared() <= 1.0 {
-                                next_fin.push([p1, p2]);
-                            }
-                        }
-                        Some(Node::Split { interm_idx: i2 }) => next_sm.push([p1, i2]),
-                    }
-                }
-                if next_fin.len() >= WORK_SIZE {
-                    let chunk = std::mem::replace(&mut next_fin, Vec::with_capacity(WORK_SIZE));
-                    state.finished.lock().unwrap().push(chunk);
-                }
-                if next_sm.len() >= WORK_SIZE {
-                    let chunk = std::mem::replace(&mut next_sm, Vec::with_capacity(WORK_SIZE));
-                    state.work.lock().unwrap().push(Work {
-                        work: chunk,
-                        ty: Type::SingleMulti,
-                        width: width * 0.5,
-                    });
-                }
-            }
-            if !next_fin.is_empty() {
-                state.finished.lock().unwrap().push(next_fin);
-            }
-            if !next_sm.is_empty() {
-                state.work.lock().unwrap().push(Work {
-                    work: next_sm,
-                    ty: Type::SingleMulti,
+                    work: next_work,
                     width: width * 0.5,
                 });
             }
@@ -492,19 +431,8 @@ impl Tree {
                                 continue 'outer;
                             };
                             let _ = i;
-                            /*
-                            println!(
-                                "Thread {i} work {} {:?} #{}",
-                                work.width,
-                                work.ty,
-                                work.work.len()
-                            );
-                            */
 
-                            match work.ty {
-                                Type::MultiMulti => do_mm_drain(work.work, work.width, state),
-                                Type::SingleMulti => do_sm_drain(work.work, work.width, state),
-                            }
+                            do_work(work.work, work.width, state);
                         }
                     })
                 })
@@ -560,7 +488,7 @@ fn naive(particles: &[Vectorf]) -> Vec<[u32; 2]> {
 const VALIDATE: bool = false;
 const CRAZY_SIMD: bool = true;
 const NUM_THREADS: usize = 32;
-const WORK_SIZE: usize = 8192;
+const WORK_SIZE: usize = 16384;
 
 fn main() -> Result<()> {
     let file = BufReader::new(File::open(
