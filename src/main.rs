@@ -263,7 +263,7 @@ impl Tree {
                 ty: Type::MultiMulti,
             },
         };
-        let state = State {
+        let mut state = State {
             work: Mutex::new(vec![initial_work]),
             finished: Mutex::new(Vec::new()),
             semaphore: AtomicUsize::new(NUM_THREADS),
@@ -517,13 +517,13 @@ impl Tree {
             }
 
             assert!(state.work.lock().unwrap().is_empty());
-            let mut pairs = Vec::with_capacity(particles.len() * particles.len() / 1000);
-            while let Some(mut finished) = state.finished.lock().unwrap().pop() {
-                pairs.append(&mut finished);
-            }
 
-            pairs
-        })
+        });
+        let mut pairs = Vec::with_capacity(particles.len() * particles.len() / 1000);
+        while let Some(mut finished) = state.finished.get_mut().unwrap().pop() {
+            pairs.append(&mut finished);
+        }
+        pairs
     }
 }
 type Vectorf = Vector3<Coord>;
@@ -561,7 +561,7 @@ fn naive(particles: &[Vectorf]) -> Vec<(u32, u32)> {
 const VALIDATE: bool = false;
 const CRAZY_SIMD: bool = true;
 const NUM_THREADS: usize = 32;
-const WORK_SIZE: usize = 1024;
+const WORK_SIZE: usize = 8192;
 
 fn main() -> Result<()> {
     let file = BufReader::new(File::open(
