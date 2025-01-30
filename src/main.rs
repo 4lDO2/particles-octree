@@ -254,7 +254,11 @@ impl Tree {
             Some(Node::Split { interm_idx }) => Work {
                 work: {
                     let mut w = WorkVec::default();
-                    w.push([Node::Split { interm_idx }.raw(); 2]);
+                    for i in 0..8 {
+                        for j in i..8 {
+                            w.push([arena[interm_idx as usize][i], arena[interm_idx as usize][j]]);
+                        }
+                    }
                     w
                 },
                 width: Coord::powi(2.0, self.root_level.into()),
