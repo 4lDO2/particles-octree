@@ -271,8 +271,6 @@ impl Tree {
 
         let abs_mask: __m128 = unsafe { _mm_castsi128_ps(_mm_set1_epi32(!((1 << 31) as i32))) };
 
-        const WORK_SIZE: usize = 1024;
-
         let do_mm_drain = |mm: Vec<[u32; 2]>, width: Coord, state: &State| {
             let vec2w = unsafe { _mm_broadcast_ss(&(2.0 * width)) };
 
@@ -388,11 +386,11 @@ impl Tree {
                         }
                     }
                 }
-                /*if next_fin.len() >= next_fin.capacity() {
+                if next_fin.len() >= WORK_SIZE {
                     let chunk = std::mem::replace(&mut next_fin, Vec::with_capacity(WORK_SIZE));
                     state.finished.lock().unwrap().push(chunk);
                 }
-                if next_sm.len() >= next_sm.capacity() {
+                if next_sm.len() >= WORK_SIZE {
                     let chunk = std::mem::replace(&mut next_sm, Vec::with_capacity(WORK_SIZE));
                     state.work.lock().unwrap().push(Work {
                         work: chunk,
@@ -400,14 +398,14 @@ impl Tree {
                         width: width * 0.5,
                     });
                 }
-                if next_mm.len() >= next_mm.capacity() {
+                if next_mm.len() >= WORK_SIZE {
                     let chunk = std::mem::replace(&mut next_mm, Vec::with_capacity(WORK_SIZE));
                     state.work.lock().unwrap().push(Work {
                         work: chunk,
                         ty: Type::MultiMulti,
                         width: width * 0.5,
                     });
-                }*/
+                }
             }
             if !next_fin.is_empty() {
                 state.finished.lock().unwrap().push(next_fin);
@@ -450,18 +448,18 @@ impl Tree {
                         Some(Node::Split { interm_idx: i2 }) => next_sm.push([p1, i2]),
                     }
                 }
-                /*if next_fin.len() >= next_fin.capacity() {
+                if next_fin.len() >= WORK_SIZE {
                     let chunk = std::mem::replace(&mut next_fin, Vec::with_capacity(WORK_SIZE));
                     state.finished.lock().unwrap().push(chunk);
                 }
-                if next_sm.len() >= next_sm.capacity() {
+                if next_sm.len() >= WORK_SIZE {
                     let chunk = std::mem::replace(&mut next_sm, Vec::with_capacity(WORK_SIZE));
                     state.work.lock().unwrap().push(Work {
                         work: chunk,
                         ty: Type::SingleMulti,
                         width: width * 0.5,
                     });
-                }*/
+                }
             }
             if !next_fin.is_empty() {
                 state.finished.lock().unwrap().push(next_fin);
@@ -493,6 +491,15 @@ impl Tree {
                                 state.semaphore.fetch_add(1, Ordering::SeqCst);
                                 continue 'outer;
                             };
+                            let _ = i;
+                            /*
+                            println!(
+                                "Thread {i} work {} {:?} #{}",
+                                work.width,
+                                work.ty,
+                                work.work.len()
+                            );
+                            */
 
                             match work.ty {
                                 Type::MultiMulti => do_mm_drain(work.work, work.width, state),
@@ -554,6 +561,7 @@ fn naive(particles: &[Vectorf]) -> Vec<(u32, u32)> {
 const VALIDATE: bool = false;
 const CRAZY_SIMD: bool = true;
 const NUM_THREADS: usize = 32;
+const WORK_SIZE: usize = 1024;
 
 fn main() -> Result<()> {
     let file = BufReader::new(File::open(
