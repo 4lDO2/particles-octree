@@ -266,7 +266,7 @@ impl Tree {
         let state = State {
             work: Mutex::new(vec![initial_work]),
             finished: Mutex::new(Vec::new()),
-            semaphore: AtomicUsize::new(32),
+            semaphore: AtomicUsize::new(NUM_THREADS),
         };
 
         let abs_mask: __m128 = unsafe { _mm_castsi128_ps(_mm_set1_epi32(!((1 << 31) as i32))) };
@@ -388,7 +388,7 @@ impl Tree {
                         }
                     }
                 }
-                if next_fin.len() >= next_fin.capacity() {
+                /*if next_fin.len() >= next_fin.capacity() {
                     let chunk = std::mem::replace(&mut next_fin, Vec::with_capacity(WORK_SIZE));
                     state.finished.lock().unwrap().push(chunk);
                 }
@@ -407,7 +407,7 @@ impl Tree {
                         ty: Type::MultiMulti,
                         width: width * 0.5,
                     });
-                }
+                }*/
             }
             if !next_fin.is_empty() {
                 state.finished.lock().unwrap().push(next_fin);
@@ -422,7 +422,7 @@ impl Tree {
             if !next_mm.is_empty() {
                 state.work.lock().unwrap().push(Work {
                     work: next_mm,
-                    ty: Type::SingleMulti,
+                    ty: Type::MultiMulti,
                     width: width * 0.5,
                 });
             }
@@ -450,7 +450,7 @@ impl Tree {
                         Some(Node::Split { interm_idx: i2 }) => next_sm.push([p1, i2]),
                     }
                 }
-                if next_fin.len() >= next_fin.capacity() {
+                /*if next_fin.len() >= next_fin.capacity() {
                     let chunk = std::mem::replace(&mut next_fin, Vec::with_capacity(WORK_SIZE));
                     state.finished.lock().unwrap().push(chunk);
                 }
@@ -461,7 +461,7 @@ impl Tree {
                         ty: Type::SingleMulti,
                         width: width * 0.5,
                     });
-                }
+                }*/
             }
             if !next_fin.is_empty() {
                 state.finished.lock().unwrap().push(next_fin);
@@ -474,14 +474,10 @@ impl Tree {
                 });
             }
         };
-        let do_work = |Work { work, ty, width }: Work, state: &State| match ty {
-            Type::MultiMulti => do_mm_drain(work, width, state),
-            Type::SingleMulti => do_sm_drain(work, width, state),
-        };
 
         std::thread::scope(|scope| {
             let state = &state;
-            let workers = (0..32)
+            let workers = (0..NUM_THREADS)
                 .map(|i| {
                     scope.spawn(move || {
                         'outer: loop {
@@ -497,13 +493,11 @@ impl Tree {
                                 state.semaphore.fetch_add(1, Ordering::SeqCst);
                                 continue 'outer;
                             };
-                            println!(
-                                "Thread {i} work {} {:?} #{}",
-                                work.width,
-                                work.ty,
-                                work.work.len()
-                            );
-                            do_work(work, &state);
+
+                            match work.ty {
+                                Type::MultiMulti => do_mm_drain(work.work, work.width, state),
+                                Type::SingleMulti => do_sm_drain(work.work, work.width, state),
+                            }
                         }
                     })
                 })
@@ -511,14 +505,14 @@ impl Tree {
             while state.semaphore.load(Ordering::SeqCst) > 0 {
                 std::thread::yield_now();
             }
+            for worker in workers {
+                worker.join().unwrap();
+            }
+
             assert!(state.work.lock().unwrap().is_empty());
             let mut pairs = Vec::with_capacity(particles.len() * particles.len() / 1000);
             while let Some(mut finished) = state.finished.lock().unwrap().pop() {
                 pairs.append(&mut finished);
-            }
-
-            for worker in workers {
-                drop(worker);
             }
 
             pairs
@@ -559,6 +553,7 @@ fn naive(particles: &[Vectorf]) -> Vec<(u32, u32)> {
 
 const VALIDATE: bool = false;
 const CRAZY_SIMD: bool = true;
+const NUM_THREADS: usize = 32;
 
 fn main() -> Result<()> {
     let file = BufReader::new(File::open(
