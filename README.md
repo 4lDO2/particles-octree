@@ -8,6 +8,7 @@ Run the code using
 cargo run --release -- /path/to/positions.xyz
 ```
 
+This code works with Rust Stable or latest nightly.
 
 ## Algorithm
 
@@ -24,6 +25,6 @@ I first optimized the algorithm itself (i.e. the lower bound used to filter away
 
 ## Caveats
 
-This implementation uses single-precision floating points, due to their small size. I tested that there were not any particles conflicting in the actual data, but for larger data sets it may be necessary to use double-precision floats instead. The ideal method, at least for constructing the tree, would have been to use fixpoint coordinates (in that case, tree insertion would merely involve walking the tree based on the binary digits of any particle's position), but for SIMD this more or less requires AVX-512.
+This implementation uses single-precision floating points, due to their small size. The validation code verifies that there were not any conflicting-position particles in the actual data, but for larger data sets it may be necessary to use double-precision floats instead. The ideal method, at least for constructing the tree, would have been to use fixpoint coordinates (in that case, looking at the coordinate bits would directly give the subnode index, rather than having to compare floats). But without AVX512, SIMD support for integer multiplication etc. is quite limited.
 
 Additionally, although not a significant contributor to new unnecessary particles to check, the (particle, node)-pair case treats the node as a sphere, which although valid is not the most accurate lower bound for the distance. Perhaps there is a fast SIMD code sequence for this, but again, finer-grained filtering will be done at the lower-order tree level anyway.
