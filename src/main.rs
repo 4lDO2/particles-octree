@@ -8,11 +8,11 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use crossbeam_deque::{Stealer, Worker};
+use crossbeam_deque::Worker;
 use nalgebra::Vector3;
 
 #[derive(Clone, Copy, Debug)]
@@ -417,7 +417,7 @@ impl Tree {
             }
         };
 
-        let workers: [Worker<Work>; NUM_THREADS] = std::array::from_fn(|i| Worker::new_lifo());
+        let workers: [Worker<Work>; NUM_THREADS] = std::array::from_fn(|_| Worker::new_lifo());
         workers[0].push(initial_work);
         let stealers = workers.each_ref().map(|w| w.stealer());
         let mut workers = workers.map(Some);
