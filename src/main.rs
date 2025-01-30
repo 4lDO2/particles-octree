@@ -7,8 +7,8 @@ use std::arch::x86_64::{
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::num::NonZeroU32;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -503,11 +503,9 @@ const NUM_THREADS: usize = 32;
 const WORK_SIZE: usize = 8192;
 
 fn main() -> Result<()> {
-    let file = BufReader::new(File::open(
-        std::env::args()
-            .nth(1)
-            .unwrap_or_else(|| "data/positions.xyz".into()),
-    )?);
+    let file = BufReader::new(File::open(std::env::args().nth(1).unwrap_or_else(|| {
+        "student-challenge-particle-simulation/data/positions_large.xyz".into()
+    }))?);
 
     let now00 = Instant::now();
     let raw_particles = {
