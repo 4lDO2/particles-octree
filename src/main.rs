@@ -7,11 +7,12 @@ use std::arch::x86_64::{
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::num::NonZeroU32;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, RwLock};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use crossbeam_deque::{Stealer, Worker};
 use nalgebra::Vector3;
 
 #[derive(Clone, Copy, Debug)]
@@ -243,7 +244,6 @@ impl Tree {
         }
 
         struct State {
-            work: Mutex<Vec<Work>>,
             finished: Mutex<Vec<Vec<[u32; 2]>>>,
             semaphore: AtomicUsize,
         }
@@ -257,14 +257,16 @@ impl Tree {
             },
         };
         let mut state = State {
-            work: Mutex::new(vec![initial_work]),
             finished: Mutex::new(Vec::new()),
             semaphore: AtomicUsize::new(NUM_THREADS),
         };
 
         let abs_mask: __m128 = unsafe { _mm_castsi128_ps(_mm_set1_epi32(!((1 << 31) as i32))) };
 
-        let do_work = |work: Vec<[RawIndex; 2]>, width: Coord, state: &State| {
+        let do_work = |work: Vec<[RawIndex; 2]>,
+                       width: Coord,
+                       state: &State,
+                       worker: &Worker<Work>| {
             let vec2w = unsafe { _mm_broadcast_ss(&(2.0 * width)) };
 
             let mut next_work = Vec::with_capacity(WORK_SIZE);
@@ -395,7 +397,7 @@ impl Tree {
                 }
                 if next_work.len() >= WORK_SIZE {
                     let chunk = std::mem::replace(&mut next_work, Vec::with_capacity(WORK_SIZE));
-                    state.work.lock().unwrap().push(Work {
+                    worker.push(Work {
                         work: chunk,
                         width: width * 0.5,
                     });
@@ -405,23 +407,32 @@ impl Tree {
                 state.finished.lock().unwrap().push(next_fin);
             }
             if !next_work.is_empty() {
-                state.work.lock().unwrap().push(Work {
+                worker.push(Work {
                     work: next_work,
                     width: width * 0.5,
                 });
             }
         };
 
+        let workers: [Worker<Work>; NUM_THREADS] = std::array::from_fn(|i| Worker::new_lifo());
+        workers[0].push(initial_work);
+        let stealers = workers.each_ref().map(|w| w.stealer());
+        let mut workers = workers.map(Some);
+
         std::thread::scope(|scope| {
             let state = &state;
-            let workers = (0..NUM_THREADS)
+            let stealers = &stealers;
+            let threads = (0..NUM_THREADS)
                 .map(|i| {
+                    let worker = workers[i].take().unwrap();
                     scope.spawn(move || {
                         'outer: loop {
-                            let tried = state.work.lock().unwrap().pop();
+                            let tried = worker
+                                .pop()
+                                .or_else(|| stealers.iter().find_map(|s| s.steal().success()));
                             let Some(work) = tried else {
                                 state.semaphore.fetch_sub(1, Ordering::SeqCst);
-                                while state.work.lock().unwrap().is_empty() {
+                                while stealers.iter().all(|s| s.is_empty()) {
                                     if state.semaphore.load(Ordering::SeqCst) == 0 {
                                         break 'outer;
                                     }
@@ -432,7 +443,7 @@ impl Tree {
                             };
                             let _ = i;
 
-                            do_work(work.work, work.width, state);
+                            do_work(work.work, work.width, state, &worker);
                         }
                     })
                 })
@@ -440,11 +451,9 @@ impl Tree {
             while state.semaphore.load(Ordering::SeqCst) > 0 {
                 std::thread::yield_now();
             }
-            for worker in workers {
-                worker.join().unwrap();
+            for thread in threads {
+                thread.join().unwrap();
             }
-
-            assert!(state.work.lock().unwrap().is_empty());
         });
         let mut pairs = Vec::with_capacity(particles.len() * particles.len() / 1000);
         while let Some(mut finished) = state.finished.get_mut().unwrap().pop() {
