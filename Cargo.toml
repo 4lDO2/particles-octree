@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.93"
+arrayvec = "0.7.6"
 crossbeam-deque = "0.8.6"
 nalgebra = "0.33.2"
 

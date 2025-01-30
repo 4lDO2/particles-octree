@@ -238,8 +238,10 @@ impl Tree {
     ) -> Vec<[u32; 2]> {
         // TODO: parallelize
 
+        type WorkVec = Box<arrayvec::ArrayVec<[RawIndex; 2], WORK_SIZE>>;
+
         struct Work {
-            work: Vec<[RawIndex; 2]>,
+            work: WorkVec,
             width: Coord,
         }
 
@@ -252,7 +254,11 @@ impl Tree {
             None => return Vec::new(),
             Some(Node::Final { particle_idx }) => return vec![[particle_idx, particle_idx]],
             Some(Node::Split { interm_idx }) => Work {
-                work: vec![[Node::Split { interm_idx }.raw(); 2]],
+                work: {
+                    let mut w = WorkVec::default();
+                    w.push([Node::Split { interm_idx }.raw(); 2]);
+                    w
+                },
                 width: Coord::powi(2.0, self.root_level.into()),
             },
         };
@@ -263,18 +269,15 @@ impl Tree {
 
         let abs_mask: __m128 = unsafe { _mm_castsi128_ps(_mm_set1_epi32(!((1 << 31) as i32))) };
 
-        let do_work = |work: Vec<[RawIndex; 2]>,
-                       width: Coord,
-                       state: &State,
-                       worker: &Worker<Work>| {
+        let do_work = |mut work: WorkVec, width: Coord, state: &State, worker: &Worker<Work>| {
             let vec2w = unsafe { _mm_broadcast_ss(&(2.0 * width)) };
 
-            let mut next_work = Vec::with_capacity(WORK_SIZE);
+            let mut next_work = WorkVec::default();
             let mut next_fin = Vec::with_capacity(WORK_SIZE);
 
-            for [r1, r2] in work {
+            for [r1, r2] in work.drain(..) {
                 if next_work.len() >= WORK_SIZE - 64 {
-                    let chunk = std::mem::replace(&mut next_work, Vec::with_capacity(WORK_SIZE));
+                    let chunk = std::mem::replace(&mut next_work, Default::default());
                     worker.push(Work {
                         work: chunk,
                         width: width * 0.5,
