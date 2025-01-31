@@ -7,6 +7,7 @@ use std::io::{BufRead, BufReader};
 use std::num::NonZeroU32;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -271,6 +272,7 @@ impl Tree {
 
         let abs_mask: __m128 = unsafe { _mm_castsi128_ps(_mm_set1_epi32(!((1 << 31) as i32))) };
 
+        let visited = AtomicUsize::new(0);
         let do_work = |mut work: WorkVec, width: Coord, state: &State, worker: &Worker<Work>| {
             let vec2w = unsafe { _mm_broadcast_ss(&(2.0 * width)) };
 
@@ -402,6 +404,7 @@ impl Tree {
                         }
                     }
                     (Node::Final { particle_idx: p1 }, Node::Final { particle_idx: p2 }) => {
+                        visited.fetch_add(1, Ordering::SeqCst);
                         if (particles[p1 as usize] - particles[p2 as usize]).norm_squared() <= 1.0 {
                             next_fin.push([p1, p2]);
                         }
@@ -460,6 +463,7 @@ impl Tree {
                 thread.join().unwrap();
             }
         });
+        dbg!(visited);
         let mut pairs = Vec::with_capacity(particles.len() * particles.len() / 1000);
         while let Some(mut finished) = state.finished.get_mut().unwrap().pop() {
             pairs.append(&mut finished);
@@ -499,7 +503,7 @@ fn naive(particles: &[Vectorf]) -> Vec<[u32; 2]> {
     pairs
 }
 
-const VALIDATE: bool = false;
+const VALIDATE: bool = true;
 const CRAZY_SIMD: bool = true;
 const NUM_THREADS: usize = 32;
 const WORK_SIZE: usize = 8192;
@@ -510,7 +514,7 @@ fn main() -> Result<()> {
     }))?);
 
     let now00 = Instant::now();
-    let raw_particles = {
+    let mut raw_particles = {
         // reserve index 0 for null sentinel
         std::iter::once(Ok(Vectorf::repeat(Coord::NAN)))
             .chain(file.lines().map(|line| -> Result<Vectorf> {
@@ -524,8 +528,9 @@ fn main() -> Result<()> {
             }))
             .collect::<Result<Vec<_>>>()?
     };
+    raw_particles.push(Vectorf::repeat(Coord::NAN));
     println!("Parsed in {:?}", now00.elapsed());
-    let particles = &raw_particles[1..];
+    let particles = &raw_particles[1..raw_particles.len() - 1];
 
     let now0 = Instant::now();
     let max_depth = {
@@ -562,35 +567,93 @@ fn main() -> Result<()> {
     let elapsed = now0.elapsed();
     println!("Tree max depth: {max_depth}, calculated in {elapsed:?}");
 
-    let mut tree = Tree {
-        root: NULL_IDX,
-        root_level: max_depth as i8,
-        mw: Coord::INFINITY,
-        mid: Vectorf::zeros(),
-        deepest: 0,
-        len: 0,
-    };
     let now0 = Instant::now();
+
+    let (tree, arena, mut mids) = thread::scope(|scope| {
+        let threads = (0..8).map(|thread_i| {
+            let raw_particles = &raw_particles;
+            scope.spawn(move || {
+                let mut subtree = Tree {
+                    root: NULL_IDX,
+                    root_level: max_depth as i8 - 1,
+                    mw: Coord::INFINITY,
+                    mid: idx_to_vector(thread_i as u8) * Coord::powi(2.0, (max_depth - 1) as _),
+                    deepest: 0,
+                    len: 0,
+                };
+                // TODO: more efficient guess?
+                let mut subarena = Vec::<[RawIndex; 8]>::with_capacity(particles.len() / 4);
+                let mut submids = Vec::<Vectorf>::with_capacity(particles.len() / 4);
+                // reserve null index
+                subarena.push([0; 8]);
+                submids.push(Vectorf::repeat(Coord::NAN));
+
+                for i in 0..particles.len() {
+                    let idx = vector_to_idx(&particles[i]);
+                    if idx != thread_i {
+                        continue;
+                    }
+                    subtree.insert(
+                        NonZeroU32::new(1 + i as u32).unwrap(),
+                        &raw_particles,
+                        &mut subarena,
+                        &mut submids,
+                    );
+                }
+
+                (subtree, subarena, submids)
+            })
+        }).collect::<Vec<_>>();
+        let subtrees = threads.into_iter().map(|t| t.join().unwrap()).collect::<Vec<_>>();
+
+        let mut arena = Vec::<[RawIndex; 8]>::with_capacity(particles.len() * 4);
+        let mut mids = Vec::<Vectorf>::with_capacity(particles.len() * 4);
+
+        arena.push([0; 8]);
+        mids.push(Vectorf::repeat(Coord::NAN));
+
+        let mut root_node = [NULL_IDX; 8];
+
+        let mut len = 0;
+
+        for (subtree_idx, (subtree, subarena, submids)) in subtrees.into_iter().enumerate() {
+            let start = arena.len();
+
+            let subarena = &subarena[1..];
+            let submids = &submids[1..];
+
+            let translate_node = |index| match Node::from_raw_index(index) {
+                Some(Node::Split { interm_idx }) => Node::Split { interm_idx: interm_idx + start as u32 - 1 }.raw(),
+                _ => index,
+            };
+
+            arena.extend(subarena.iter().map(|a| a.map(|index| translate_node(index))));
+            //println!("SM{:?}", &submids[..30]);
+            mids.extend(submids);
+            len += subtree.len;
+
+            root_node[subtree_idx] = translate_node(subtree.root);
+        }
+
+        let root = arena.len();
+        arena.push(root_node);
+        mids.push(Vectorf::zeros());
+
+        (Tree {
+            root: Node::Split { interm_idx: root as u32 }.raw(),
+            root_level: max_depth as i8,
+            mw: Coord::INFINITY,
+            mid: Vectorf::zeros(),
+            deepest: 0,
+            len,
+        }, arena, mids)
+    });
 
     // This step is O(n log n). Even when unbalanced, this holds so long as the coordinate type
     // (int/float) is not infinitely precise (subdivisible).
 
-    // TODO: more efficient guess?
-    let mut arena = Vec::<[RawIndex; 8]>::with_capacity(2 * particles.len());
-    let mut mids = Vec::<Vectorf>::with_capacity(2 * particles.len());
-    // reserve null index
-    arena.push([0; 8]);
     mids.push(Vectorf::repeat(Coord::NAN));
-
-    for i in 0..particles.len() {
-        tree.insert(
-            NonZeroU32::new(1 + i as u32).unwrap(),
-            &raw_particles,
-            &mut arena,
-            &mut mids,
-        );
-    }
-    mids.push(Vectorf::repeat(Coord::NAN));
+    //println!("M{:?}", &mids[..30]);
     println!("Built tree in {:?}", now0.elapsed());
 
     if VALIDATE {

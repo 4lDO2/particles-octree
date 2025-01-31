@@ -16,7 +16,7 @@ The algorithm is based on exploiting the inherently recursive structure of octre
 
 ## Performance
 
-On my (overclocked) 5950X CPU, the single-threaded staged variant (see singlethread branch) parses the large dataset in 20 ms, builds the tree in 13 ms, and calculates the pairs in 90 ms. The multithreaded variant improves the last step, instead taking 3.5 ms (where 90 ms originally/32 threads = 2.81 ms, which is quite close). For data with sufficiently uniform density, it would in theory be possible to achieve very good parallelism merely by splitting the highest-level (largest) nodes among the thread workers.
+On my (overclocked) 5950X CPU, the single-threaded staged variant (see singlethread branch) parses the large dataset in 20 ms, builds the tree in 13 ms, and calculates the pairs in 90 ms. The multithreaded variant improves the last step, instead taking 3.5 ms (where 90 ms originally/32 threads = 2.81 ms, which is quite close). The tree creation part is still singlethreaded, at it was not initially the most costly step, but for data with sufficiently uniform density, this would in theory be possible parallelize efficiently, by creating subtrees in each thread which would then be merged.
 
 I first optimized the algorithm itself (i.e. the lower bound used to filter away node pairs), tried to reduce the time as much as possible when single threaded, and finally implemented work-stealing multithreading with 32 threads. There were some optimizations that intuitively seemed critical, but which unexpectedly resulted in worse perf:
 
